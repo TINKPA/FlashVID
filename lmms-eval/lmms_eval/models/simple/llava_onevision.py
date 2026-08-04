@@ -102,6 +102,10 @@ class Llava_OneVision(lmms):
         enable_budgetvid: bool = False,
         allocation: str = "uniform",
         enforce_budget: bool = True,
+        # `policy` routes to budgetvid/adapters/pipeline.py; every policy shares
+        # one assembly path so ablation rows stay comparable to baseline rows.
+        policy: str = None,
+        bv_seed: int = 42,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -173,6 +177,8 @@ class Llava_OneVision(lmms):
                 model=self._model,
                 allocation=allocation,
                 enforce_budget=enforce_budget,
+                policy=policy,
+                seed=bv_seed,
                 retention_ratio=retention_ratio,
                 expansion=expansion,
                 do_segment=do_segment,

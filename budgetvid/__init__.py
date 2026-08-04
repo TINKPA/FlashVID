@@ -57,8 +57,13 @@ def _load_heavy():
     from .allocation import available_allocations, register_allocation  # noqa: F811
     from .compression import budgetvid_compression  # noqa: F811
     from .configuration_budgetvid import BudgetVidConfig  # noqa: F811
+    from .adapters.pipeline import budgetvid_pipeline  # noqa: F811
 
     register_compression("budgetvid", budgetvid_compression)
+    # The method this project's own experiments run under. Separate from the
+    # allocation-based "budgetvid" entry so the two cannot be confused in a
+    # results table.
+    register_compression("bv", budgetvid_pipeline)
     # The inner-LLM stage is FlashVID's for now. Note that it is a *second*,
     # independent budget: the vision side keeps `retention_ratio * expansion` of
     # the tokens, then layer `pruning_layer` cuts to `llm_retention_ratio` of
@@ -104,7 +109,8 @@ def _retarget_config(model, config) -> int:
     return replaced
 
 
-def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: bool = True, **flashvid_kwargs) -> nn.Module:
+def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: bool = True,
+              policy: str | None = None, seed: int = 42, **flashvid_kwargs) -> nn.Module:
     """Apply BudgetVID to the model.
 
     Args:
@@ -115,6 +121,11 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
             reproduces FlashVID.
         enforce_budget (bool, optional): Raise if a policy spends more than the
             global budget. Defaults to True.
+        policy (str, optional): When given, route vision-side compression to
+            ``budgetvid/adapters/pipeline.py`` (method ``bv``) and run this
+            policy -- "none", "random_drop", "uniform". Leaving it None keeps
+            the allocation-based path.
+        seed (int, optional): Seed for policies with a random component.
         **flashvid_kwargs: Forwarded verbatim to ``flashvid()``
             (``retention_ratio``, ``alpha``, ``temporal_threshold``, ...).
 
@@ -139,7 +150,12 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
         **asdict(model.flashvid_config),
         allocation=allocation,
         enforce_budget=enforce_budget,
+        policy=policy or "none",
+        seed=seed,
     )
+    if policy is not None:
+        # Route to budgetvid/adapters/pipeline.py rather than the allocation path.
+        config.method = "bv"
 
     replaced = _retarget_config(model, config)
     if replaced == 0:

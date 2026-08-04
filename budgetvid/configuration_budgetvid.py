@@ -17,6 +17,15 @@ class BudgetVidConfig(FlashVidConfig):
     # Name of the budget allocation policy, see `budgetvid/allocation.py`.
     allocation: str = field(default="uniform")
 
+    # Vision-side policy for the `bv` method, see `budgetvid/adapters/pipeline.py`.
+    # Every policy shares one assembly path, which is what keeps an ablation row
+    # comparable to a baseline row.
+    policy: str = field(default="none")
+
+    # Seed for any policy with a random component; kept off global RNG state so
+    # benchmark numbers reproduce regardless of what the harness seeds.
+    seed: int = field(default=42)
+
     # Raise if a policy hands out more tokens than the global budget allows.
     # Overspending silently would invalidate every comparison against a
     # fixed-ratio baseline, so this defaults to on.
