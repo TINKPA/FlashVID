@@ -17,7 +17,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs
-from .utils import fastv_prune
+from .dispatch import prune
 from .configuration_flashvid import FlashVidConfig
 
 
@@ -97,7 +97,7 @@ def Qwen2Model_forward(
                     cache_position,
                     position_embeddings,
                     _,
-                ) = fastv_prune(
+                ) = prune(
                     hidden_states=hidden_states,
                     causal_mask=causal_mask,
                     attentions=attn,

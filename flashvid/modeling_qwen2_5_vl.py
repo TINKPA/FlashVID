@@ -25,7 +25,7 @@ from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     repeat_kv,
 )
 from .configuration_flashvid import FlashVidConfig
-from .utils import fastv_prune, flashvid_compression
+from .dispatch import compress, prune
 
 
 def Qwen2_5_VLTextModel_forward(
@@ -143,7 +143,7 @@ def Qwen2_5_VLTextModel_forward(
                     cache_position,
                     position_embeddings,
                     keep_indices,
-                ) = fastv_prune(
+                ) = prune(
                     hidden_states=hidden_states,
                     causal_mask=causal_mask,
                     attentions=attn,
@@ -463,7 +463,7 @@ def Qwen2_5_VLModel_forward(
         num_frames, num_visual_tokens = cls_attention.shape
         flashvid_config: FlashVidConfig = getattr(self, "flashvid_config")
         video_features = video_embeds.view(num_frames, num_visual_tokens, -1)
-        compressed_video_tokens, keep_visual_global_indices = flashvid_compression(
+        compressed_video_tokens, keep_visual_global_indices = compress(
             video_features=video_features,
             cls_attention=cls_attention,
             flashvid_config=flashvid_config,

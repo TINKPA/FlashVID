@@ -69,6 +69,10 @@ class Qwen3_VL(lmms):
         expansion: float = 1.25,
         pruning_layer: int = 20,
         llm_retention_ratio: float = 0.3,
+        # ! BudgetVID parameters. Every FlashVid parameter above applies too.
+        enable_budgetvid: bool = False,
+        allocation: str = "uniform",
+        enforce_budget: bool = True,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -112,6 +116,26 @@ class Qwen3_VL(lmms):
         model_fn = Qwen3VLMoeForConditionalGeneration if match else Qwen3VLForConditionalGeneration
         self._model = model_fn.from_pretrained(pretrained, **model_kwargs)
         # ! Enable FlashVID
+        assert not (enable_flashvid and enable_budgetvid), "enable_flashvid and enable_budgetvid are mutually exclusive; enable one at a time."
+        if enable_budgetvid:
+            from budgetvid import budgetvid
+
+            self._model = budgetvid(
+                model=self._model,
+                allocation=allocation,
+                enforce_budget=enforce_budget,
+                retention_ratio=retention_ratio,
+                expansion=expansion,
+                do_segment=do_segment,
+                segment_threshold=segment_threshold,
+                min_segment_num=min_segment_num,
+                complementary_segment=complementary_segment,
+                token_selection_method=token_selection_method,
+                alpha=alpha,
+                temporal_threshold=temporal_threshold,
+                pruning_layer=pruning_layer,
+                llm_retention_ratio=llm_retention_ratio,
+            )
         if enable_flashvid:
             from flashvid import flashvid
 

@@ -27,7 +27,7 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
 )
 
 from .configuration_flashvid import FlashVidConfig
-from .utils import fastv_prune, flashvid_compression
+from .dispatch import compress, prune
 
 
 def Qwen3VLVisionAttention_forward(
@@ -311,7 +311,7 @@ def Qwen3VLModel_forward(
         flashvid_config.H = video_grid_thw[0][1].item() // 2
         flashvid_config.W = video_grid_thw[0][2].item() // 2
         video_features = video_embeds.view(num_frames, num_visual_tokens, -1)
-        compressed_video_tokens, keep_visual_global_indices = flashvid_compression(
+        compressed_video_tokens, keep_visual_global_indices = compress(
             video_features=video_features,
             cls_attention=cls_attention,
             flashvid_config=flashvid_config,
@@ -455,7 +455,7 @@ def Qwen3VLTextModel_forward(
                     cache_position,
                     position_embeddings,
                     _,
-                ) = fastv_prune(
+                ) = prune(
                     hidden_states=hidden_states,
                     causal_mask=attention_mask,
                     attentions=attn,

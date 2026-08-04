@@ -12,7 +12,7 @@ from llava.model.llava_arch import LlavaMetaForCausalLM, unpad_image
 from llava.utils import rank0_print
 
 from .configuration_flashvid import FlashVidConfig
-from .utils import flashvid_compression
+from .dispatch import compress
 
 
 def LlavaMetaForCausalLM_encode_images(self: LlavaMetaForCausalLM, images: torch.Tensor):
@@ -76,7 +76,7 @@ def LlavaMetaForCausalLM_prepare_inputs_labels_for_multimodal(
                 flashvid_config.visual_token_start_index = visual_token_start_index
                 pooled_image_feature = self.get_2dPool(image_feat)
                 pooled_cls_attentions = self.get_2dPool(cls_attentions.unsqueeze(-1)).squeeze(-1)
-                compressed_visual_tokens, keep_visual_indices = flashvid_compression(
+                compressed_visual_tokens, keep_visual_indices = compress(
                     video_features=pooled_image_feature,
                     cls_attention=pooled_cls_attentions,
                     flashvid_config=flashvid_config,
