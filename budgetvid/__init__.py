@@ -57,13 +57,16 @@ def _load_heavy():
     from .allocation import available_allocations, register_allocation  # noqa: F811
     from .compression import budgetvid_compression  # noqa: F811
     from .configuration_budgetvid import BudgetVidConfig  # noqa: F811
-    from .adapters.pipeline import budgetvid_pipeline  # noqa: F811
+    from .adapters.pipeline import budgetvid_pipeline, no_llm_pruning  # noqa: F811
 
     register_compression("budgetvid", budgetvid_compression)
     # The method this project's own experiments run under. Separate from the
     # allocation-based "budgetvid" entry so the two cannot be confused in a
     # results table.
     register_compression("bv", budgetvid_pipeline)
+    # `bv` has a single budget by construction, so the inner-LLM stage is a
+    # no-op. Without this the dispatch raises KeyError at `pruning_layer`.
+    register_llm_pruning("bv", no_llm_pruning)
     # The inner-LLM stage is FlashVID's for now. Note that it is a *second*,
     # independent budget: the vision side keeps `retention_ratio * expansion` of
     # the tokens, then layer `pruning_layer` cuts to `llm_retention_ratio` of

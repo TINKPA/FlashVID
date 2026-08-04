@@ -63,3 +63,27 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
     tokens, g = assemble(video_features, keep, merged=None, expected_total=B)
     flashvid_config.visual_token_length = int(tokens.shape[0])
     return tokens, g
+
+
+def no_llm_pruning(hidden_states, causal_mask, attentions, cache_position,
+                   position_ids, position_embeddings, flashvid_config,
+                   visual_pos_masks=None):
+    """Inner-LLM pruning stage for method ``bv``: keep everything.
+
+    FlashVID carries a SECOND, independent budget -- the vision side keeps
+    `retention_ratio * expansion` of the tokens and layer `pruning_layer` then
+    cuts to `llm_retention_ratio` of what survived, which is why its headline
+    "R" is a per-layer average and its true visual-token count sits ~30% above
+    the naive r*N (experiments/flashvid_token_accounting).
+
+    This method has one budget by construction: B is the number of tokens the
+    LLM is given, and §2.2's budget equality is exact. Pruning again inside the
+    LLM would make the reported B a lie. So this is a deliberate no-op, not a
+    stub -- keep_indices is every position, and nothing else is touched.
+    """
+    keep = torch.arange(hidden_states.shape[1], device=hidden_states.device)
+    if cache_position is None:
+        cache_position = keep
+    if position_ids is None:
+        position_ids = keep.unsqueeze(0)
+    return hidden_states, causal_mask, position_ids, cache_position, position_embeddings, keep
