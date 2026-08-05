@@ -18,9 +18,12 @@ import torch
 
 from ..core.assembly import assemble
 from ..core.budget import split_budget
+from ..core.merging import seeded_merge
 from ..core.policies import random_drop_keep, uniform_keep
+from ..core.routing import route_tokens
+from ..core.scoring import score_tokens
 
-POLICIES = ("none", "random_drop", "uniform")
+POLICIES = ("none", "random_drop", "uniform", "threeway", "prune_only", "merge_only")
 
 
 def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor,
@@ -52,15 +55,51 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
     b_t = split_budget(B, L, N_f).to(device)
 
     seed = int(getattr(flashvid_config, "seed", 42))
-    if policy == "uniform":
-        keep = uniform_keep(L, N_f, b_t, device=device)
-    else:
-        keep = random_drop_keep(L, N_f, b_t, seed=seed, device=device)
+    if policy in ("uniform", "random_drop"):
+        keep = (uniform_keep(L, N_f, b_t, device=device) if policy == "uniform"
+                else random_drop_keep(L, N_f, b_t, seed=seed, device=device))
+        for t, k in enumerate(keep):
+            assert k.numel() == int(b_t[t]), (t, k.numel(), int(b_t[t]))
+        tokens, g = assemble(video_features, keep, merged=None, expected_total=B)
+        flashvid_config.visual_token_length = int(tokens.shape[0])
+        return tokens, g
 
-    for t, k in enumerate(keep):
-        assert k.numel() == int(b_t[t]), (t, k.numel(), int(b_t[t]))
+    # ---- the method itself: score -> route -> merge -> assemble ----
+    cfg = flashvid_config
+    grid = int(round(N_f ** 0.5))
+    if grid * grid != N_f:
+        raise ValueError(f"N_f={N_f} is not a square grid; the 4-neighbourhood needs one")
 
-    tokens, g = assemble(video_features, keep, merged=None, expected_total=B)
+    sc = score_tokens(video_features.float(), cls_attention.float(), (grid, grid),
+                      eta=float(getattr(cfg, "eta", 0.5)),
+                      lam=float(getattr(cfg, "lam", 1.0)))
+
+    # Ablation rows B and A of spec §2.4, expressed as routing degeneracies rather
+    # than as separate code paths, so they share this exact pipeline.
+    force_alpha = getattr(cfg, "force_alpha", None)
+    active_frac = getattr(cfg, "active_frac", None)
+    if policy == "prune_only":          # M_t = empty -> pure pruning
+        force_alpha = 1.0
+    elif policy == "merge_only":        # D_t = empty -> pure merging
+        active_frac = 1.0
+
+    rt = route_tokens(
+        sc["S"], sc["R_raw_mean"], b_t,
+        alpha_min=float(getattr(cfg, "alpha_min", 0.4)),
+        alpha_max=float(getattr(cfg, "alpha_max", 0.8)),
+        beta=None if active_frac is not None else float(getattr(cfg, "beta", 4.0)),
+        active_frac=active_frac,
+        force_alpha=force_alpha,
+        alpha_flip=bool(getattr(cfg, "alpha_flip", False)),
+    )
+
+    merged = []
+    for t in range(L):
+        merged.append(seeded_merge(video_features[t], rt["pool_idx"][t],
+                                   sc["S"][t], int(rt["B_M"][t])))
+
+    tokens, g = assemble(video_features, rt["retain_idx"], merged=merged,
+                         expected_total=B)
     flashvid_config.visual_token_length = int(tokens.shape[0])
     return tokens, g
 

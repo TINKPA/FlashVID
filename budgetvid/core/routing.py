@@ -50,7 +50,8 @@ def route_tokens(
     b_t: torch.Tensor,
     alpha_min: float = 0.4,
     alpha_max: float = 0.8,
-    beta: float = 4.0,
+    beta: float | None = None,
+    active_frac: float | None = None,
     force_alpha: float | None = None,
     alpha_flip: bool = False,
 ) -> dict:
@@ -69,8 +70,12 @@ def route_tokens(
     L, N_f = S.shape
     if b_t.shape[0] != L:
         raise ValueError(f"b_t has {b_t.shape[0]} entries but S has {L} frames")
-    if beta < 1:
+    if (beta is None) == (active_frac is None):
+        raise ValueError("give exactly one of beta or active_frac")
+    if beta is not None and beta < 1:
         raise ValueError(f"beta must be >= 1, got {beta}")
+    if active_frac is not None and not 0 < active_frac <= 1:
+        raise ValueError(f"active_frac must be in (0,1], got {active_frac}")
 
     if force_alpha is not None:
         alpha = torch.full((L,), float(force_alpha), device=S.device)
@@ -90,7 +95,14 @@ def route_tokens(
             raise ValueError(f"b_t[{t}]={bt} > N_f={N_f}")
         B_R = int(math.floor(float(alpha[t]) * bt))
         B_M = bt - B_R
-        N_act = min(N_f, math.ceil(beta * bt))
+        # active_frac states N_active/N_f directly. beta cannot: N_active/N_f ~=
+        # beta*r, so a fixed beta drifts out of the effective window [0.5, 1) as
+        # r changes -- at r=1.25% the useful beta is [40, 80), and a beta of 4
+        # would silently degenerate the method to pure pruning. Measured in
+        # Step 2 (plan H4 / D5).
+        N_act = (min(N_f, math.ceil(active_frac * N_f)) if active_frac is not None
+                 else min(N_f, math.ceil(beta * bt)))
+        N_act = max(N_act, bt)
         # b_t <= N_f and beta >= 1  =>  N_act >= b_t  =>  |pool| = N_act - B_R >= B_M
         assert N_act >= bt, (N_act, bt)
         assert N_act - B_R >= B_M, (N_act, B_R, B_M)
