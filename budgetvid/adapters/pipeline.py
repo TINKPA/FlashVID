@@ -76,8 +76,9 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
 
     # Ablation rows B and A of spec §2.4, expressed as routing degeneracies rather
     # than as separate code paths, so they share this exact pipeline.
-    force_alpha = getattr(cfg, "force_alpha", None)
-    active_frac = getattr(cfg, "active_frac", None)
+    fa = float(getattr(cfg, "force_alpha", -1.0))
+    force_alpha = fa if fa >= 0 else None     # dataclasses cannot hold None here
+    active_frac = float(getattr(cfg, "active_frac", 0.6))
     if policy == "prune_only":          # M_t = empty -> pure pruning
         force_alpha = 1.0
     elif policy == "merge_only":        # D_t = empty -> pure merging

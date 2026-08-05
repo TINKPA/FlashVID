@@ -113,7 +113,11 @@ def _retarget_config(model, config) -> int:
 
 
 def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: bool = True,
-              policy: str | None = None, seed: int = 42, **flashvid_kwargs) -> nn.Module:
+              policy: str | None = None, seed: int = 42,
+              eta: float = 0.5, lam: float = 1.0,
+              alpha_min: float = 0.4, alpha_max: float = 0.8,
+              active_frac: float = 0.6, alpha_flip: bool = False,
+              force_alpha: float = -1.0, **flashvid_kwargs) -> nn.Module:
     """Apply BudgetVID to the model.
 
     Args:
@@ -155,6 +159,8 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
         enforce_budget=enforce_budget,
         policy=policy or "none",
         seed=seed,
+        eta=eta, lam=lam, alpha_min=alpha_min, alpha_max=alpha_max,
+        active_frac=active_frac, alpha_flip=alpha_flip, force_alpha=force_alpha,
     )
     if policy is not None:
         # Route to budgetvid/adapters/pipeline.py rather than the allocation path.

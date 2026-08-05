@@ -26,6 +26,17 @@ class BudgetVidConfig(FlashVidConfig):
     # benchmark numbers reproduce regardless of what the harness seeds.
     seed: int = field(default=42)
 
+    # --- scoring / routing hyperparameters (spec §3.1-3.2) ---
+    eta: float = field(default=0.5)          # R = (1-eta)*R_sp + eta*R_tp
+    lam: float = field(default=1.0)          # S = I_hat - lam*R_hat
+    alpha_min: float = field(default=0.4)
+    alpha_max: float = field(default=0.8)
+    # N_active/N_f stated directly. See core/routing.py for why beta cannot be
+    # held fixed across retention ratios.
+    active_frac: float = field(default=0.6)
+    alpha_flip: bool = field(default=False)  # ablation row 5
+    force_alpha: float = field(default=-1.0) # <0 means "unset"
+
     # Raise if a policy hands out more tokens than the global budget allows.
     # Overspending silently would invalidate every comparison against a
     # fixed-ratio baseline, so this defaults to on.

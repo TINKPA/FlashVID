@@ -106,6 +106,13 @@ class Llava_OneVision(lmms):
         # one assembly path so ablation rows stay comparable to baseline rows.
         policy: str = None,
         bv_seed: int = 42,
+        eta: float = 0.5,
+        lam: float = 1.0,
+        alpha_min: float = 0.4,
+        alpha_max: float = 0.8,
+        active_frac: float = 0.6,
+        alpha_flip: bool = False,
+        force_alpha: float = -1.0,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -179,6 +186,8 @@ class Llava_OneVision(lmms):
                 enforce_budget=enforce_budget,
                 policy=policy,
                 seed=bv_seed,
+                eta=eta, lam=lam, alpha_min=alpha_min, alpha_max=alpha_max,
+                active_frac=active_frac, alpha_flip=alpha_flip, force_alpha=force_alpha,
                 retention_ratio=retention_ratio,
                 expansion=expansion,
                 do_segment=do_segment,
