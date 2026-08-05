@@ -14,6 +14,8 @@ two as the same knob.
 
 from __future__ import annotations
 
+import pathlib
+
 import torch
 
 from ..core.assembly import assemble
@@ -24,6 +26,15 @@ from ..core.routing import route_tokens
 from ..core.scoring import score_tokens
 
 POLICIES = ("none", "random_drop", "uniform", "threeway", "prune_only", "merge_only")
+
+
+def _rank01(v: torch.Tensor) -> torch.Tensor:
+    """Within-frame rank percentile, matching core.scoring.rank_normalize."""
+    n = v.shape[-1]
+    o = v.argsort(dim=-1, stable=True)
+    r = torch.empty_like(o)
+    r.scatter_(-1, o, torch.arange(n, device=v.device).expand_as(o))
+    return r.float() / max(n - 1, 1)
 
 
 def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor,
@@ -70,7 +81,20 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
     if grid * grid != N_f:
         raise ValueError(f"N_f={N_f} is not a square grid; the 4-neighbourhood needs one")
 
-    sc = score_tokens(video_features.float(), cls_attention.float(), (grid, grid),
+    I_used = cls_attention.float()
+    if bool(getattr(cfg, "debias_pos", False)):
+        # The importance signal is ~27% positional (Step 2): eight of the 196
+        # cells sit in the frame's top-b_t 98.5% of the time. At b_t=2 that means
+        # both retained tokens are the same two grid cells in every frame, so a
+        # 256-frame video contributes 256 copies of one position instead of
+        # coverage. Subtracting the position mean removes exactly that component
+        # and leaves the content-dependent part.
+        import numpy as _np
+        _b = _np.load(pathlib.Path(__file__).resolve().parents[1] / "assets" / f"pos_baseline_pooled{N_f}.npy")
+        base = torch.from_numpy(_b).to(I_used.device, I_used.dtype)
+        I_used = _rank01(I_used) - base.unsqueeze(0)
+
+    sc = score_tokens(video_features.float(), I_used, (grid, grid),
                       eta=float(getattr(cfg, "eta", 0.5)),
                       lam=float(getattr(cfg, "lam", 1.0)))
 

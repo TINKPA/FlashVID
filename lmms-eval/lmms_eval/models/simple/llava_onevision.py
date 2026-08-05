@@ -113,6 +113,7 @@ class Llava_OneVision(lmms):
         active_frac: float = 0.6,
         alpha_flip: bool = False,
         force_alpha: float = -1.0,
+        debias_pos: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -188,6 +189,7 @@ class Llava_OneVision(lmms):
                 seed=bv_seed,
                 eta=eta, lam=lam, alpha_min=alpha_min, alpha_max=alpha_max,
                 active_frac=active_frac, alpha_flip=alpha_flip, force_alpha=force_alpha,
+                debias_pos=debias_pos,
                 retention_ratio=retention_ratio,
                 expansion=expansion,
                 do_segment=do_segment,

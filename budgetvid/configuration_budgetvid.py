@@ -35,6 +35,10 @@ class BudgetVidConfig(FlashVidConfig):
     # held fixed across retention ratios.
     active_frac: float = field(default=0.6)
     alpha_flip: bool = field(default=False)  # ablation row 5
+    # Ablation row G: subtract the cross-video mean importance of each grid
+    # position before ranking. Measures what the attention sink costs, without
+    # making de-biasing part of the method (decision of 2026-08-04).
+    debias_pos: bool = field(default=False)
     force_alpha: float = field(default=-1.0) # <0 means "unset"
 
     # Raise if a policy hands out more tokens than the global budget allows.
