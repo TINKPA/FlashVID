@@ -334,7 +334,14 @@ class Qwen3_VL(lmms):
                             # max_pixels = height * width
                             # Tag the upcoming compression dump with the video's
                             # filename stem so npz records join back to questions.
+                            # Under multi-GPU accelerate the model may be
+                            # DDP-wrapped, hiding the config behind .module --
+                            # without this, dumps fall back to per-question
+                            # tags (seen 2026-08-11: 308 npz instead of 102).
                             _cfg = getattr(self._model, "flashvid_config", None)
+                            if _cfg is None:
+                                _cfg = getattr(getattr(self._model, "module", None),
+                                               "flashvid_config", None)
                             if _cfg is not None:
                                 _cfg.dump_tag = os.path.splitext(os.path.basename(visual))[0]
                             processed_visuals.append(

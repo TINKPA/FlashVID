@@ -578,6 +578,9 @@ class Llava_OneVision(lmms):
                         # Tag the upcoming compression dump with the video's
                         # filename stem so npz records join back to questions.
                         _cfg = getattr(self._model, "flashvid_config", None)
+                        if _cfg is None:  # DDP-wrapped model hides it in .module
+                            _cfg = getattr(getattr(self._model, "module", None),
+                                           "flashvid_config", None)
                         if _cfg is not None:
                             _cfg.dump_tag = os.path.splitext(os.path.basename(visual[0]))[0]
                         image_tensor = []
