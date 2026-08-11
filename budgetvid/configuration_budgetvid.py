@@ -45,3 +45,8 @@ class BudgetVidConfig(FlashVidConfig):
     # Overspending silently would invalidate every comparison against a
     # fixed-ratio baseline, so this defaults to on.
     enforce_budget: bool = field(default=True)
+
+    # Per-video signal/routing dumps (budgetvid/recording.py). Empty = off.
+    # The per-sample tag is set by the eval wrapper (`dump_tag`, a transient
+    # attribute, deliberately not a dataclass field: it changes every sample).
+    dump_dir: str = field(default="")

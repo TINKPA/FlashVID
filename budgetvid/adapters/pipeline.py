@@ -24,6 +24,7 @@ from ..core.merging import seeded_merge
 from ..core.policies import random_drop_keep, uniform_keep
 from ..core.routing import route_tokens
 from ..core.scoring import score_tokens
+from ..recording import dump_record, frame_stats, make_tag
 
 POLICIES = ("none", "random_drop", "uniform", "threeway", "prune_only", "merge_only")
 
@@ -73,13 +74,35 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
             assert k.numel() == int(b_t[t]), (t, k.numel(), int(b_t[t]))
         tokens, g = assemble(video_features, keep, merged=None, expected_total=B)
         flashvid_config.visual_token_length = int(tokens.shape[0])
+        dump_dir = str(getattr(flashvid_config, "dump_dir", "") or "")
+        if dump_dir:
+            labels = torch.zeros(L, N_f, dtype=torch.int8)
+            for t, k in enumerate(keep):
+                labels[t, k.cpu().long()] = 2
+            dump_record(dump_dir, make_tag(flashvid_config),
+                        {"I_raw": cls_attention},
+                        {"labels": labels, "kept_g": g, "b_t": b_t},
+                        {"method": "bv", "policy": policy, "L": L, "N_f": N_f,
+                         "retention_ratio": r, "B": B, "seed": seed},
+                        frame_stats(cls_attention))
         return tokens, g
 
     # ---- the method itself: score -> route -> merge -> assemble ----
     cfg = flashvid_config
-    grid = int(round(N_f ** 0.5))
-    if grid * grid != N_f:
-        raise ValueError(f"N_f={N_f} is not a square grid; the 4-neighbourhood needs one")
+    # Grid shape: Qwen3-VL's native-resolution grid is not square; its modeling
+    # code stores (H, W) on the config before compress() (spec v1.3 §2.1). The
+    # LLaVA path has no such fields and stays on the square-root route.
+    cfg_h = int(getattr(cfg, "H", 0) or 0)
+    cfg_w = int(getattr(cfg, "W", 0) or 0)
+    if cfg_h > 0 and cfg_w > 0 and cfg_h * cfg_w == N_f:
+        grid = (cfg_h, cfg_w)
+    else:
+        s = int(round(N_f ** 0.5))
+        if s * s != N_f:
+            raise ValueError(
+                f"N_f={N_f} is not square and config H*W ({cfg_h}x{cfg_w}) does not "
+                "match it; the 4-neighbourhood needs the true grid shape")
+        grid = (s, s)
 
     I_used = cls_attention.float()
     if bool(getattr(cfg, "debias_pos", False)):
@@ -94,7 +117,7 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
         base = torch.from_numpy(_b).to(I_used.device, I_used.dtype)
         I_used = _rank01(I_used) - base.unsqueeze(0)
 
-    sc = score_tokens(video_features.float(), I_used, (grid, grid),
+    sc = score_tokens(video_features.float(), I_used, grid,
                       eta=float(getattr(cfg, "eta", 0.5)),
                       lam=float(getattr(cfg, "lam", 1.0)))
 
@@ -118,15 +141,61 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
         alpha_flip=bool(getattr(cfg, "alpha_flip", False)),
     )
 
-    merged = []
+    merged, absorb = [], []
     for t in range(L):
-        merged.append(seeded_merge(video_features[t], rt["pool_idx"][t],
-                                   sc["S"][t], int(rt["B_M"][t])))
+        m, s, pool_tok, pool_seed = seeded_merge(video_features[t], rt["pool_idx"][t],
+                                                 sc["S"][t], int(rt["B_M"][t]),
+                                                 return_assign=True)
+        merged.append((m, s))
+        absorb.append((pool_tok, pool_seed))
 
     tokens, g = assemble(video_features, rt["retain_idx"], merged=merged,
                          expected_total=B)
     flashvid_config.visual_token_length = int(tokens.shape[0])
+
+    dump_dir = str(getattr(cfg, "dump_dir", "") or "")
+    if dump_dir:
+        _dump_threeway(dump_dir, cfg, policy, r, B, grid, cls_attention, I_used,
+                       sc, rt, absorb, b_t, g, L, N_f)
     return tokens, g
+
+
+def _dump_threeway(dump_dir, cfg, policy, r, B, grid, cls_attention, I_used,
+                   sc, rt, absorb, b_t, g, L, N_f):
+    """Round-1 recording: routing labels, absorption map, and every scoring
+    intermediate, per video. See budgetvid/recording.py for the file layout."""
+    labels = torch.zeros(L, N_f, dtype=torch.int8)
+    seed_of = torch.full((L, N_f), -1, dtype=torch.int32)
+    for t in range(L):
+        labels[t, rt["retain_idx"][t].cpu().long()] = 2
+        p = rt["pool_idx"][t]
+        if p.numel():
+            labels[t, p.cpu().long()] = 1
+        pool_tok, pool_seed = absorb[t]
+        if pool_tok.numel():
+            seed_of[t, pool_tok.cpu().long()] = pool_seed.cpu().to(torch.int32)
+    meta = {
+        "method": "bv", "policy": policy, "L": L, "N_f": N_f, "grid": list(grid),
+        "retention_ratio": r, "B": B,
+        "lam": float(getattr(cfg, "lam", 1.0)),
+        "eta": float(getattr(cfg, "eta", 0.5)),
+        "alpha_min": float(getattr(cfg, "alpha_min", 0.4)),
+        "alpha_max": float(getattr(cfg, "alpha_max", 0.8)),
+        "active_frac": float(getattr(cfg, "active_frac", 0.6)),
+        "alpha_flip": bool(getattr(cfg, "alpha_flip", False)),
+        "debias_pos": bool(getattr(cfg, "debias_pos", False)),
+        "force_alpha": float(getattr(cfg, "force_alpha", -1.0)),
+        "seed": int(getattr(cfg, "seed", 42)),
+    }
+    floats = {"I_raw": cls_attention, "I_used": I_used,
+              "R_sp": sc["R_sp"], "R_tp": sc["R_tp"], "R_raw": sc["R_raw"],
+              "I_hat": sc["I_hat"], "R_hat": sc["R_hat"], "S": sc["S"],
+              "alpha": rt["alpha"]}
+    ints = {"labels": labels, "seed_of": seed_of, "kept_g": g,
+            "b_t": b_t, "B_R": rt["B_R"], "B_M": rt["B_M"],
+            "N_active": rt["N_active"]}
+    dump_record(dump_dir, make_tag(cfg), floats, ints, meta,
+                frame_stats(cls_attention, sc["R_sp"], sc["R_tp"]))
 
 
 def no_llm_pruning(hidden_states, causal_mask, attentions, cache_position,

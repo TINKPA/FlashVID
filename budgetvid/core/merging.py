@@ -18,7 +18,8 @@ def seeded_merge(
     pool_idx: torch.Tensor,
     S_frame: torch.Tensor,
     B_M: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    return_assign: bool = False,
+) -> tuple[torch.Tensor, ...]:
     """Merge one frame's pool into ``B_M`` tokens.
 
     Args:
@@ -26,14 +27,20 @@ def seeded_merge(
         pool_idx: within-frame indices of the merge pool, in descending-S order.
         S_frame: [N_f] routing scores.
         B_M: how many tokens to emit.
+        return_assign: also return the absorption map, for run recording
+            (budgetvid/recording.py). The merge itself is unchanged.
 
     Returns:
         ``(merged [B_M, D], seed_idx [B_M])`` -- seed_idx are within-frame
-        indices, used by Phase D for position inheritance.
+        indices, used by Phase D for position inheritance. With
+        ``return_assign=True``, additionally ``(pool_tok [P], pool_seed [P])``:
+        every pool member (seeds included) and the within-frame seed index it
+        was absorbed into (seeds map to themselves).
     """
     if B_M <= 0 or pool_idx.numel() == 0:
         empty = X_frame.new_zeros((0, X_frame.shape[-1]))
-        return empty, pool_idx.new_zeros((0,))
+        eidx = pool_idx.new_zeros((0,))
+        return (empty, eidx, eidx, eidx) if return_assign else (empty, eidx)
     if pool_idx.numel() < B_M:
         raise ValueError(f"pool has {pool_idx.numel()} tokens but B_M={B_M}; "
                          "the routing invariant N_active - B_R >= B_M was violated")
@@ -50,7 +57,7 @@ def seeded_merge(
 
     if rest.numel() == 0:
         # Nothing to absorb: each seed is its own singleton mean, i.e. itself.
-        return X_frame[seeds], seeds
+        return (X_frame[seeds], seeds, seeds, seeds) if return_assign else (X_frame[seeds], seeds)
 
     sn = seed_feats / seed_feats.norm(dim=-1, keepdim=True).clamp_min(1e-8)
     rf = X_frame[rest].float()
@@ -63,4 +70,6 @@ def seeded_merge(
     counts = torch.ones(B_M, device=X_frame.device, dtype=sums.dtype)
     counts.index_add_(0, assign, torch.ones_like(assign, dtype=sums.dtype))
     merged = (sums / counts.unsqueeze(-1)).to(X_frame.dtype)
+    if return_assign:
+        return merged, seeds, pool, torch.cat([seeds, seeds[assign]])
     return merged, seeds

@@ -118,6 +118,7 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
               alpha_min: float = 0.4, alpha_max: float = 0.8,
               active_frac: float = 0.6, alpha_flip: bool = False,
               force_alpha: float = -1.0, debias_pos: bool = False,
+              dump_dir: str = "",
               **flashvid_kwargs) -> nn.Module:
     """Apply BudgetVID to the model.
 
@@ -134,6 +135,9 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
             policy -- "none", "random_drop", "uniform". Leaving it None keeps
             the allocation-based path.
         seed (int, optional): Seed for policies with a random component.
+        dump_dir (str, optional): When set, every compressed video's signals
+            and routing decisions are dumped there (budgetvid/recording.py).
+            The eval wrapper sets ``dump_tag`` on the config per sample.
         **flashvid_kwargs: Forwarded verbatim to ``flashvid()``
             (``retention_ratio``, ``alpha``, ``temporal_threshold``, ...).
 
@@ -162,7 +166,7 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
         seed=seed,
         eta=eta, lam=lam, alpha_min=alpha_min, alpha_max=alpha_max,
         active_frac=active_frac, alpha_flip=alpha_flip, force_alpha=force_alpha,
-        debias_pos=debias_pos,
+        debias_pos=debias_pos, dump_dir=dump_dir,
     )
     if policy is not None:
         # Route to budgetvid/adapters/pipeline.py rather than the allocation path.

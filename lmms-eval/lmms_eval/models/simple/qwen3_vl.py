@@ -1,3 +1,4 @@
+import os
 import re
 from typing import List, Optional, Tuple, Union
 
@@ -73,6 +74,20 @@ class Qwen3_VL(lmms):
         enable_budgetvid: bool = False,
         allocation: str = "uniform",
         enforce_budget: bool = True,
+        # `policy` routes to budgetvid/adapters/pipeline.py; every policy shares
+        # one assembly path so ablation rows stay comparable to baseline rows.
+        policy: str = None,
+        bv_seed: int = 42,
+        eta: float = 0.5,
+        lam: float = 1.0,
+        alpha_min: float = 0.4,
+        alpha_max: float = 0.8,
+        active_frac: float = 0.6,
+        alpha_flip: bool = False,
+        force_alpha: float = -1.0,
+        debias_pos: bool = False,
+        # Per-video signal/routing dumps (budgetvid/recording.py). Empty = off.
+        dump_dir: str = "",
         **kwargs,
     ) -> None:
         super().__init__()
@@ -117,6 +132,12 @@ class Qwen3_VL(lmms):
         self._model = model_fn.from_pretrained(pretrained, **model_kwargs)
         # ! Enable FlashVID
         assert not (enable_flashvid and enable_budgetvid), "enable_flashvid and enable_budgetvid are mutually exclusive; enable one at a time."
+        if dump_dir and enable_flashvid:
+            # Record FlashVID's own kept indices so case analysis can compare
+            # selections across methods (registry shim; no upstream edits).
+            from budgetvid.recording import wrap_flashvid_keep
+
+            wrap_flashvid_keep(dump_dir)
         if enable_budgetvid:
             from budgetvid import budgetvid
 
@@ -124,6 +145,12 @@ class Qwen3_VL(lmms):
                 model=self._model,
                 allocation=allocation,
                 enforce_budget=enforce_budget,
+                policy=policy,
+                seed=bv_seed,
+                eta=eta, lam=lam, alpha_min=alpha_min, alpha_max=alpha_max,
+                active_frac=active_frac, alpha_flip=alpha_flip, force_alpha=force_alpha,
+                debias_pos=debias_pos,
+                dump_dir=dump_dir,
                 retention_ratio=retention_ratio,
                 expansion=expansion,
                 do_segment=do_segment,
@@ -305,6 +332,11 @@ class Qwen3_VL(lmms):
                             first_frame = vr[0].asnumpy()
                             height, width = first_frame.shape[:2]
                             # max_pixels = height * width
+                            # Tag the upcoming compression dump with the video's
+                            # filename stem so npz records join back to questions.
+                            _cfg = getattr(self._model, "flashvid_config", None)
+                            if _cfg is not None:
+                                _cfg.dump_tag = os.path.splitext(os.path.basename(visual))[0]
                             processed_visuals.append(
                                 {
                                     "type": "video",
