@@ -47,3 +47,34 @@ def random_drop_keep(L: int, N_f: int, b_t: torch.Tensor, seed: int = 42,
         perm = torch.randperm(N_f, generator=g)[:k].sort().values
         out.append(perm.to(device) if device is not None else perm)
     return out
+
+
+def attn_top_keep(I: torch.Tensor, b_t: torch.Tensor,
+                  sink_cells: torch.Tensor | None = None) -> list[torch.Tensor]:
+    """Per-frame top-``b_t`` positions by raw importance (Round-2 B+ probe).
+
+    The retain-only diagnostic that trusts the attention signal completely --
+    equivalent to ``prune_only`` with ``lam=0`` up to tie-breaking (topk on the
+    raw signal vs. stable-argsort ranks). With ``sink_cells`` given, those grid
+    positions are excluded BEFORE ranking (``attn_top_nosink``); the difference
+    between the two rows is the net effect of sink tokens on a pure-attention
+    selector at that budget, pre-registered to grow as the budget tightens.
+    """
+    L, N_f = I.shape
+    I = I.detach().float().clone()
+    n_sink = 0
+    if sink_cells is not None and sink_cells.numel():
+        sink_cells = sink_cells.to(I.device).long()
+        if int(sink_cells.max()) >= N_f or int(sink_cells.min()) < 0:
+            raise ValueError(f"sink cell index out of range for N_f={N_f}")
+        I[:, sink_cells] = float("-inf")
+        n_sink = int(sink_cells.numel())
+    out = []
+    for t in range(L):
+        k = int(b_t[t])
+        if k > N_f - n_sink:
+            raise ValueError(
+                f"frame {t}: budget {k} exceeds the {N_f - n_sink} non-sink cells")
+        idx = I[t].topk(k).indices.sort().values
+        out.append(idx)
+    return out

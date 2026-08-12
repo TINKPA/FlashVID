@@ -1,0 +1,229 @@
+{
+  "source_run": "20260811-180214_fb6b0cd_qwen3_videomme_bv306_threeway_lam1.0_r0.0625",
+  "n_question_dumps": 308,
+  "n_unique_videos": 102,
+  "statistic": "mean within-frame tie-safe average rank of I_raw, normalized to [0,1]",
+  "sink_rule": "cells with mean rank >= 0.85 in the grid's own baseline (grids with >= 10 videos); smaller grids inherit the dominant grid 20x36's sink set via fractional coordinates",
+  "dominant_grid": [
+    20,
+    36
+  ],
+  "grids": {
+    "20x36": {
+      "n_videos": 89,
+      "n_frames": 1424,
+      "n_sink_cells": 18,
+      "sink_frac": 0.025,
+      "sink_rule": "own baseline",
+      "sink_cells_rowcol": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          0,
+          2
+        ],
+        [
+          0,
+          9
+        ],
+        [
+          0,
+          10
+        ],
+        [
+          0,
+          29
+        ],
+        [
+          0,
+          30
+        ],
+        [
+          0,
+          31
+        ],
+        [
+          0,
+          35
+        ],
+        [
+          3,
+          35
+        ],
+        [
+          4,
+          0
+        ],
+        [
+          4,
+          35
+        ],
+        [
+          13,
+          35
+        ],
+        [
+          19,
+          5
+        ],
+        [
+          19,
+          6
+        ],
+        [
+          19,
+          25
+        ],
+        [
+          19,
+          26
+        ],
+        [
+          19,
+          35
+        ]
+      ],
+      "map_min": 0.3571,
+      "map_median": 0.4853,
+      "map_p90": 0.5819,
+      "map_p95": 0.6603,
+      "map_p99": 0.9451,
+      "map_max": 0.9943,
+      "sink_mean_rank": 0.9262
+    },
+    "11x20": {
+      "n_videos": 12,
+      "n_frames": 192,
+      "n_sink_cells": 9,
+      "sink_frac": 0.0409,
+      "sink_rule": "own baseline",
+      "sink_cells_rowcol": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          0,
+          5
+        ],
+        [
+          0,
+          16
+        ],
+        [
+          0,
+          17
+        ],
+        [
+          1,
+          19
+        ],
+        [
+          2,
+          19
+        ],
+        [
+          10,
+          14
+        ],
+        [
+          10,
+          19
+        ]
+      ],
+      "map_min": 0.3454,
+      "map_median": 0.476,
+      "map_p90": 0.594,
+      "map_p95": 0.8343,
+      "map_p99": 0.9399,
+      "map_max": 0.9732,
+      "sink_mean_rank": 0.9131
+    },
+    "10x21": {
+      "n_videos": 1,
+      "n_frames": 16,
+      "n_sink_cells": 15,
+      "sink_frac": 0.0714,
+      "sink_rule": "fractional transfer from 20x36",
+      "sink_cells_rowcol": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          0,
+          5
+        ],
+        [
+          0,
+          6
+        ],
+        [
+          0,
+          17
+        ],
+        [
+          0,
+          18
+        ],
+        [
+          0,
+          20
+        ],
+        [
+          1,
+          20
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          2,
+          20
+        ],
+        [
+          6,
+          20
+        ],
+        [
+          9,
+          3
+        ],
+        [
+          9,
+          14
+        ],
+        [
+          9,
+          15
+        ],
+        [
+          9,
+          20
+        ]
+      ],
+      "map_min": 0.2436,
+      "map_median": 0.479,
+      "map_p90": 0.7177,
+      "map_p95": 0.884,
+      "map_p99": 0.982,
+      "map_max": 0.997,
+      "sink_mean_rank": 0.8889
+    }
+  }
+}

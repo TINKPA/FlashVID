@@ -14,6 +14,7 @@ two as the same knob.
 
 from __future__ import annotations
 
+import hashlib
 import pathlib
 
 import torch
@@ -21,12 +22,15 @@ import torch
 from ..core.assembly import assemble
 from ..core.budget import split_budget
 from ..core.merging import seeded_merge
-from ..core.policies import random_drop_keep, uniform_keep
+from ..core.policies import attn_top_keep, random_drop_keep, uniform_keep
 from ..core.routing import route_tokens
 from ..core.scoring import score_tokens
 from ..recording import dump_record, frame_stats, make_tag
 
-POLICIES = ("none", "random_drop", "uniform", "threeway", "prune_only", "merge_only")
+POLICIES = ("none", "random_drop", "uniform", "threeway", "prune_only", "merge_only",
+            "attn_top", "attn_top_nosink")
+
+_ASSETS = pathlib.Path(__file__).resolve().parents[1] / "assets"
 
 
 def _rank01(v: torch.Tensor) -> torch.Tensor:
@@ -36,6 +40,49 @@ def _rank01(v: torch.Tensor) -> torch.Tensor:
     r = torch.empty_like(o)
     r.scatter_(-1, o, torch.arange(n, device=v.device).expand_as(o))
     return r.float() / max(n - 1, 1)
+
+
+def _derived_seed(base_seed: int, tag: str) -> int:
+    """Per-video seed for random policies (Round-2 preprocessing step 3).
+
+    Round 1 seeded every video with the same global 42, so random_drop used ONE
+    mask for the whole benchmark -- coverage variance across videos was zero and
+    per-video analysis on the random arm was structurally impossible. Deriving
+    from (base_seed, video tag) keeps runs reproducible while making the masks
+    independent across videos.
+    """
+    return int(hashlib.sha256(f"{base_seed}:{tag}".encode()).hexdigest()[:8], 16)
+
+
+def _grid_from_config(cfg, N_f: int):
+    """(H, W) if the modeling code declared the native grid and it matches N_f."""
+    h = int(getattr(cfg, "H", 0) or 0)
+    w = int(getattr(cfg, "W", 0) or 0)
+    if h > 0 and w > 0 and h * w == N_f:
+        return h, w
+    return None
+
+
+def _sink_cells(cfg, N_f: int) -> tuple[torch.Tensor, str]:
+    """Load the offline sink-cell set for the video's native grid.
+
+    Built by experiments/budgetvid/scripts/build_qwen3_pos_baseline.py from the
+    Round-1 dumps (mean within-frame rank >= 0.85, corner + border population;
+    provenance in assets/pos_baseline_qwen3_meta.json). attn_top_nosink cannot
+    run without it -- that is by design, not a fallback situation.
+    """
+    grid = _grid_from_config(cfg, N_f)
+    if grid is None:
+        raise RuntimeError(
+            "attn_top_nosink needs the native grid (config.H/W); it is only "
+            "wired for backbones that declare it (Qwen3-VL)")
+    p = _ASSETS / f"sink_cells_qwen3_{grid[0]}x{grid[1]}.npy"
+    if not p.exists():
+        raise FileNotFoundError(
+            f"positional baseline not built for grid {grid[0]}x{grid[1]}: {p} "
+            "(run build_qwen3_pos_baseline.py first)")
+    import numpy as np
+    return torch.from_numpy(np.load(p)).long(), p.name
 
 
 def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor,
@@ -67,9 +114,23 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
     b_t = split_budget(B, L, N_f).to(device)
 
     seed = int(getattr(flashvid_config, "seed", 42))
-    if policy in ("uniform", "random_drop"):
-        keep = (uniform_keep(L, N_f, b_t, device=device) if policy == "uniform"
-                else random_drop_keep(L, N_f, b_t, seed=seed, device=device))
+    if policy in ("uniform", "random_drop", "attn_top", "attn_top_nosink"):
+        extra_meta = {}
+        if policy == "uniform":
+            keep = uniform_keep(L, N_f, b_t, device=device)
+        elif policy == "random_drop":
+            tag = str(getattr(flashvid_config, "dump_tag", "") or "")
+            if tag:
+                extra_meta = {"seed_base": seed, "seed_tag": tag}
+                seed = _derived_seed(seed, tag)
+            keep = random_drop_keep(L, N_f, b_t, seed=seed, device=device)
+        else:
+            sink = None
+            if policy == "attn_top_nosink":
+                sink, asset = _sink_cells(flashvid_config, N_f)
+                extra_meta = {"n_sink_cells": int(sink.numel()), "sink_asset": asset}
+            keep = [k.to(device) for k in attn_top_keep(cls_attention, b_t,
+                                                        sink_cells=sink)]
         for t, k in enumerate(keep):
             assert k.numel() == int(b_t[t]), (t, k.numel(), int(b_t[t]))
         tokens, g = assemble(video_features, keep, merged=None, expected_total=B)
@@ -83,7 +144,7 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
                         {"I_raw": cls_attention},
                         {"labels": labels, "kept_g": g, "b_t": b_t},
                         {"method": "bv", "policy": policy, "L": L, "N_f": N_f,
-                         "retention_ratio": r, "B": B, "seed": seed},
+                         "retention_ratio": r, "B": B, "seed": seed, **extra_meta},
                         frame_stats(cls_attention))
         return tokens, g
 
@@ -113,7 +174,13 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
         # coverage. Subtracting the position mean removes exactly that component
         # and leaves the content-dependent part.
         import numpy as _np
-        _b = _np.load(pathlib.Path(__file__).resolve().parents[1] / "assets" / f"pos_baseline_pooled{N_f}.npy")
+        # Native-grid backbones (Qwen3-VL) get a per-grid baseline built offline
+        # from the Round-1 dumps; the LLaVA square grid keeps its original file.
+        _pq = _ASSETS / f"pos_baseline_qwen3_{grid[0]}x{grid[1]}.npy"
+        if _grid_from_config(cfg, N_f) is not None and _pq.exists():
+            _b = _np.load(_pq).reshape(-1)
+        else:
+            _b = _np.load(_ASSETS / f"pos_baseline_pooled{N_f}.npy")
         base = torch.from_numpy(_b).to(I_used.device, I_used.dtype)
         I_used = _rank01(I_used) - base.unsqueeze(0)
 

@@ -88,6 +88,12 @@ class Qwen3_VL(lmms):
         debias_pos: bool = False,
         # Per-video signal/routing dumps (budgetvid/recording.py). Empty = off.
         dump_dir: str = "",
+        # Round-2 group A control (read by the CHAT subclass, which is what
+        # `--model qwen3_vl` resolves to): True withholds the real video
+        # metadata from the processor so timestamps regenerate at the fps=24
+        # default -- the defect spec v1.3 assumed all runs had. Default False =
+        # real timestamps, the behaviour every Qwen3 run actually used.
+        fps_defect: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -181,6 +187,16 @@ class Qwen3_VL(lmms):
                 llm_retention_ratio=llm_retention_ratio,
             )
             # print(f"[INFO] Enable FlashVID with retention_ratio={retention_ratio}, expansion={expansion}, do_segment={do_segment}, segment_threshold={segment_threshold}, min_segment_num={min_segment_num}, complementary_segment={complementary_segment}, token_selection_method={token_selection_method}, alpha={alpha}, temporal_threshold={temporal_threshold}, pruning_layer={pruning_layer}, llm_retention_ratio={llm_retention_ratio}")
+
+        # Capture the config reference NOW, before accelerate touches the model:
+        # generate_until must tag dumps through the object that
+        # budgetvid()._retarget_config installed. Round-1 root cause (found
+        # Round 2): `--model qwen3_vl` resolves to the CHAT subclass, whose
+        # generate_until override had no tag-setting code at all -- the
+        # fb6b0cd .module guess was aimed at a getattr that never executed.
+        # Both generate_untils now read this stash.
+        self._bv_cfg = getattr(self._model, "flashvid_config", None)
+        self.fps_defect = fps_defect
 
         self._model.eval()
         self.max_pixels = max_pixels
@@ -333,15 +349,34 @@ class Qwen3_VL(lmms):
                             height, width = first_frame.shape[:2]
                             # max_pixels = height * width
                             # Tag the upcoming compression dump with the video's
-                            # filename stem so npz records join back to questions.
-                            # Under multi-GPU accelerate the model may be
-                            # DDP-wrapped, hiding the config behind .module --
-                            # without this, dumps fall back to per-question
-                            # tags (seen 2026-08-11: 308 npz instead of 102).
-                            _cfg = getattr(self._model, "flashvid_config", None)
+                            # filename stem so npz records join back to
+                            # questions. NB: `--model qwen3_vl` resolves to the
+                            # CHAT subclass, whose generate_until override has
+                            # its own copy of this block -- Round 1's
+                            # per-question dumps happened because only THIS
+                            # (unused) method carried it. Kept for --force_simple
+                            # runs. BV_DEBUG_TAG=1 prints what each resolution
+                            # step saw (run with LIMIT=1 to diagnose).
+                            _cfg = self._bv_cfg
                             if _cfg is None:
-                                _cfg = getattr(getattr(self._model, "module", None),
-                                               "flashvid_config", None)
+                                _cfg = getattr(self._model, "flashvid_config", None)
+                            if _cfg is None:
+                                _m = getattr(self._model, "module", None)
+                                _cfg = getattr(_m, "flashvid_config", None) if _m is not None else None
+                            if _cfg is None and hasattr(self._model, "modules"):
+                                for _m in self._model.modules():
+                                    _cfg = getattr(_m, "flashvid_config", None)
+                                    if _cfg is not None:
+                                        break
+                            if os.environ.get("BV_DEBUG_TAG"):
+                                print(
+                                    f"[BV_DEBUG_TAG] rank={self._rank} "
+                                    f"model={type(self._model).__name__} "
+                                    f"stashed={self._bv_cfg is not None} "
+                                    f"direct={getattr(self._model, 'flashvid_config', None) is not None} "
+                                    f"resolved={_cfg is not None} visual={os.path.basename(visual)}",
+                                    flush=True,
+                                )
                             if _cfg is not None:
                                 _cfg.dump_tag = os.path.splitext(os.path.basename(visual))[0]
                             processed_visuals.append(
