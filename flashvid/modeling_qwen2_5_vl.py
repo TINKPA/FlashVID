@@ -462,6 +462,12 @@ def Qwen2_5_VLModel_forward(
     if position_ids.shape[-1] > 1:
         num_frames, num_visual_tokens = cls_attention.shape
         flashvid_config: FlashVidConfig = getattr(self, "flashvid_config")
+        # Store feature map resolution -- the same two lines modeling_qwen3_vl.py
+        # already carries. Without them the config grid stays 0x0, and any policy
+        # using the spatial redundancy term dies on a non-square N_f because the
+        # 4-neighbourhood cannot be laid out. //2 is the patch merge.
+        flashvid_config.H = video_grid_thw[0][1].item() // 2
+        flashvid_config.W = video_grid_thw[0][2].item() // 2
         video_features = video_embeds.view(num_frames, num_visual_tokens, -1)
         compressed_video_tokens, keep_visual_global_indices = compress(
             video_features=video_features,
