@@ -87,6 +87,16 @@ class Qwen2_5_VL(lmms):
         alpha_flip: bool = False,
         force_alpha: float = -1.0,
         debias_pos: bool = False,
+        # ! BudgetVID 2.0 (measure quantization), spec 2026-08-28_method_budgetvid2_v1.
+        # Every one of these is an ablation switch except `lift`/`gamma_v`, which
+        # pick the metric space the grouping decisions are taken in.
+        lift: str = "kv",
+        gamma_v: float = 1.0,
+        lift_norm: bool = True,
+        mq_alloc: str = "waterfill",
+        centroid: str = "rms",
+        b_max: int = 0,
+        mass: bool = True,
         # Per-video signal/routing dumps (budgetvid/recording.py). Empty = off.
         dump_dir: str = "",
         **kwargs,
@@ -150,6 +160,8 @@ class Qwen2_5_VL(lmms):
                 eta=eta, lam=lam, alpha_min=alpha_min, alpha_max=alpha_max,
                 active_frac=active_frac, alpha_flip=alpha_flip, force_alpha=force_alpha,
                 debias_pos=debias_pos,
+                lift=lift, gamma_v=gamma_v, lift_norm=lift_norm,
+                mq_alloc=mq_alloc, centroid=centroid, b_max=b_max, mass=mass,
                 dump_dir=dump_dir,
                 retention_ratio=retention_ratio,
                 expansion=expansion,

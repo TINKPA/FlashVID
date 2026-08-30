@@ -27,7 +27,7 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
 )
 
 from .configuration_flashvid import FlashVidConfig
-from .dispatch import compress, prune
+from .dispatch import compress, prune, score_bias
 
 
 def Qwen3VLVisionAttention_forward(
@@ -438,6 +438,7 @@ def Qwen3VLTextModel_forward(
         raise ValueError("FlashVid configuration is not set in the model.")
     flashvid_config: FlashVidConfig = getattr(self, "flashvid_config")
     is_prefill = hidden_states.shape[1] > 1
+    attention_mask = score_bias(attention_mask, hidden_states, cache_position, flashvid_config)
 
     # decoder layers
     for layer_idx, decoder_layer in enumerate(self.layers):

@@ -25,7 +25,7 @@ from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     repeat_kv,
 )
 from .configuration_flashvid import FlashVidConfig
-from .dispatch import compress, prune
+from .dispatch import compress, prune, score_bias
 
 
 def Qwen2_5_VLTextModel_forward(
@@ -126,6 +126,7 @@ def Qwen2_5_VLTextModel_forward(
     assert all(decoder_layer.attention_type == "full_attention" for decoder_layer in self.layers[: self.config.num_hidden_layers])
     _output_attentions = output_attentions
     causal_mask = causal_mask_mapping["full_attention"]
+    causal_mask = score_bias(causal_mask, hidden_states, cache_position, flashvid_config)
     for layer_idx, decoder_layer in enumerate(self.layers):
         if output_hidden_states:
             all_hidden_states += (hidden_states,)

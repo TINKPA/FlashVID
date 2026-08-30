@@ -1,0 +1,192 @@
+"""BudgetVID 2.0 core tests: metric lift, CBA curves, water-filling, MPQ, mass.
+
+No GPU, no model, no decord:
+
+    uv run --no-project --python 3.11 --with torch python budgetvid/tests/test_mq.py
+
+Each test checks a claim the frozen spec makes
+(notes/2026-08-28_method_budgetvid2_v1.html), so a failure here is a spec
+violation rather than a style complaint.
+"""
+
+import itertools
+import pathlib
+import sys
+
+import torch
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
+from budgetvid.core.budget import split_budget                      # noqa: E402
+from budgetvid.core.quantize import (                               # noqa: E402
+    _argmax_first, _argmin_first, compress_video, fps_curves,
+    lower_convex_envelope, metric_lift, quantize_frames, waterfill,
+)
+
+PASS, FAIL = [], []
+
+
+def check(name, cond, detail=""):
+    (PASS if cond else FAIL).append(name)
+    print(f"{'PASS' if cond else 'FAIL'}  {name}" + (f"   [{detail}]" if detail and not cond else ""))
+
+
+def main():
+    torch.manual_seed(0)
+    L, N_f, d = 8, 24, 16
+
+    # ---- deterministic extrema ------------------------------------------
+    v = torch.tensor([[1.0, 3.0, 3.0, 0.0], [5.0, 5.0, 5.0, 5.0]])
+    check("01 argmax ties go to the smallest index",
+          _argmax_first(v).tolist() == [1, 0])
+    check("02 argmin ties go to the smallest index",
+          _argmin_first(v).tolist() == [3, 0])
+
+    # ---- metric lift (eq 1) ---------------------------------------------
+    x = torch.randn(L, N_f, d)
+    W_k = torch.randn(12, d) / d ** 0.5
+    W_v = torch.randn(12, d) / d ** 0.5
+    g = torch.rand(d) + 0.5
+    K, s = metric_lift(x, W_k, W_v, g, gamma_v=1.0)
+    rn = x / x.pow(2).mean(-1, keepdim=True).add(1e-6).sqrt() * g
+    ref = torch.cat([rn @ W_k.t(), rn @ W_v.t()], -1)
+    check("03 lift equals W [k|v] . RMSNorm(x)", torch.allclose(K, ref, atol=1e-4),
+          f"max |d| = {(K - ref).abs().max():.2e}")
+    check("04 s is the scale RMSNorm divides by",
+          torch.allclose((x * s).pow(2).mean(-1).sqrt(), torch.ones(L, N_f), atol=1e-3))
+
+    # ---- L1': the norm-weighted centroid is read as the metric centroid --
+    grp = x[0, :5]
+    sg = s[0, :5]
+    ybar = (grp * sg).mean(0)                       # metric-space centroid
+    A = lambda z: torch.cat([(z * g) @ W_k.t(), (z * g) @ W_v.t()], -1)
+    check("05 L1' A(y_bar) == mean of the lifted group",
+          torch.allclose(A(ybar), K[0, :5].mean(0), atol=1e-4),
+          f"max |d| = {(A(ybar) - K[0, :5].mean(0)).abs().max():.2e}")
+    delivered = ybar / ybar.norm() * grp.norm(dim=-1).mean()
+    lifted = metric_lift(delivered[None, None], W_k, W_v, g)[0][0, 0]
+    check("05b the delivered token is read as that centroid, direction-exact",
+          float(torch.nn.functional.cosine_similarity(
+              lifted, K[0, :5].mean(0), dim=0)) > 1 - 1e-6)
+
+    # ---- FPS curves (eq 2) ----------------------------------------------
+    seeds, D, r = fps_curves(K, N_f)
+    check("06 seeds are a permutation prefix (no repeats)",
+          all(len(set(seeds[t].tolist())) == N_f for t in range(L)))
+    check("07 D is non-increasing in b", bool((D[:, 1:] <= D[:, :-1] + 1e-4).all()))
+    check("08 r is non-increasing in b", bool((r[:, 1:] <= r[:, :-1] + 1e-4).all()))
+    check("09 cost and radius vanish at b = N_f",
+          float(D[:, -1].max()) < 1e-3 and float(r[:, -1].max()) < 1e-3)
+
+    # duplicates: a frame of 3 distinct tokens repeated 8x saturates at b=3
+    dup = x[0, :3].repeat(8, 1).unsqueeze(0)
+    Kd, _ = metric_lift(dup, W_k, W_v, g)
+    _, Dd, rd = fps_curves(Kd, N_f)
+    check("10 a duplicated frame saturates at its distinct count",
+          float(rd[0, 2]) < 1e-4 and float(rd[0, 1]) > 1e-4)
+
+    # ---- envelope --------------------------------------------------------
+    Db = lower_convex_envelope(D)
+    check("11 envelope lies at or below the curve", bool((Db <= D + 1e-3).all()))
+    gains = Db[:, :-1] - Db[:, 1:]
+    check("12 envelope gains are non-increasing (convex)",
+          bool((gains[:, 1:] <= gains[:, :-1] + 1e-3).all()))
+    conv = torch.tensor([[10.0, 6.0, 4.0, 3.0, 2.5]])
+    check("13 an already-convex curve is its own envelope",
+          torch.allclose(lower_convex_envelope(conv), conv, atol=1e-4))
+
+    # ---- water-filling (eq 3, L2) ---------------------------------------
+    B = 3 * L
+    b = waterfill(Db, B, r=r)
+    check("14 allocation spends exactly B", int(b.sum()) == B, f"{int(b.sum())} vs {B}")
+    check("15 every frame keeps the floor of 1", int(b.min()) >= 1)
+
+    # brute force on a small instance: greedy must BE the argmin
+    small = lower_convex_envelope(torch.tensor(
+        [[9.0, 5.0, 3.0, 2.0], [8.0, 7.5, 7.0, 6.0], [6.0, 2.0, 1.0, 0.5]]))
+    bs = waterfill(small, 7)
+    best, bestcost = None, float("inf")
+    for cand in itertools.product(range(1, 5), repeat=3):
+        if sum(cand) != 7:
+            continue
+        c = sum(float(small[t, cand[t] - 1]) for t in range(3))
+        if c < bestcost:
+            best, bestcost = cand, c
+    got = sum(float(small[t, int(bs[t]) - 1]) for t in range(3))
+    check("16 greedy allocation equals the brute-force argmin",
+          abs(got - bestcost) < 1e-6, f"greedy {got:.4f} vs best {bestcost:.4f} {best}")
+
+    # a saturated frame must not be handed budget it cannot use
+    Ksat = torch.cat([Kd, K[1:4]], 0)
+    _, Ds, rs = fps_curves(Ksat, N_f)
+    bsat = waterfill(lower_convex_envelope(Ds), 40, r=rs)
+    check("17 a saturated frame stops at its distinct count",
+          int(bsat[0]) <= 3 and int(bsat.sum()) == 40, f"b0={int(bsat[0])}, sum={int(bsat.sum())}")
+
+    # ---- MPQ (eq 4) ------------------------------------------------------
+    feats, sid, mass, cost = quantize_frames(K, x, s, seeds, b)
+    check("18 masses sum to N_f in every frame",
+          all(int(m.sum()) == N_f for m in mass))
+    check("19 every group is non-empty (m_j >= 1)",
+          all(int(m.min()) >= 1 for m in mass))
+    check("20 one token delivered per seed",
+          all(f.shape[0] == int(b[t]) == len(sid[t]) for t, f in enumerate(feats)))
+    fb, _, mb, _ = quantize_frames(K, x, s, seeds, torch.full((L,), N_f))
+    check("21 at b = N_f the quantizer is the identity",
+          torch.allclose(fb[0][seeds[0].argsort()], x[0], atol=1e-4)
+          and int(mb[0].max()) == 1,
+          f"max |d| = {(fb[0][seeds[0].argsort()] - x[0]).abs().max():.2e}")
+    check("21b a merged token keeps a token's magnitude",
+          abs(float(feats[0].norm(dim=-1).mean()) - float(x[0].norm(dim=-1).mean()))
+          < 0.15 * float(x[0].norm(dim=-1).mean()))
+
+    # ---- L5: the mass bias is an identity, not an approximation ----------
+    torch.manual_seed(1)
+    n, k, hd = 40, 6, 8
+    keys, vals = torch.randn(n, hd), torch.randn(n, hd)
+    a = torch.randint(0, k, (n,)); a[:k] = torch.arange(k)
+    m = torch.bincount(a, minlength=k).float()
+    kk = torch.stack([keys[a == j][0] for j in range(k)])   # identical within group
+    keys = kk[a]
+    vv = torch.stack([vals[a == j].mean(0) for j in range(k)])
+    vals = vv[a]
+    q = torch.randn(hd)
+    full = torch.softmax(q @ keys.t(), -1) @ vals
+    biased = torch.softmax(q @ kk.t() + m.log(), -1) @ vv
+    check("22 L5 log-mass bias reproduces the uncompressed read",
+          torch.allclose(full, biased, atol=1e-5), f"max |d| = {(full - biased).abs().max():.2e}")
+    massless = torch.softmax(q @ kk.t(), -1) @ vv
+    check("23 dropping the mass changes the answer (the ablation is not a no-op)",
+          not torch.allclose(full, massless, atol=1e-3))
+
+    # ---- end to end ------------------------------------------------------
+    out = compress_video(x, B=3 * L, W_k=W_k, W_v=W_v, g=g)
+    check("24 end to end delivers exactly B tokens",
+          sum(f.shape[0] for f in out["feats"]) == 3 * L)
+    out2 = compress_video(x, B=3 * L, W_k=W_k, W_v=W_v, g=g)
+    check("25 end to end is deterministic",
+          all(torch.equal(a_, b_) for a_, b_ in zip(out["feats"], out2["feats"])))
+    check("26 realized cost is at or above the planned envelope",
+          out["cost"] >= out["planned"] - 1e-3,
+          f"cost {out['cost']:.3f} planned {out['planned']:.3f}")
+    even = compress_video(x, B=3 * L, W_k=W_k, W_v=W_v, g=g, alloc="even")
+    check("27 alloc=even reproduces the v0 largest-remainder split",
+          torch.equal(even["b"].cpu(), split_budget(3 * L, L, N_f)))
+    check("28 water-filling costs no more than the even split",
+          out["cost"] <= even["cost"] + 1e-6,
+          f"waterfill {out['cost']:.3f} vs even {even['cost']:.3f}")
+    plain = compress_video(x, B=3 * L, W_k=W_k, W_v=W_v, g=g, centroid="plain")
+    check("29 centroid=plain is a different delivery (ablation wired)",
+          not torch.allclose(plain["feats"][0], out["feats"][0], atol=1e-5))
+    nolift = compress_video(x, B=3 * L)
+    check("30 the no-lift ablation runs and still spends B",
+          sum(f.shape[0] for f in nolift["feats"]) == 3 * L)
+
+    print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
+    if FAIL:
+        print("FAILED:", FAIL)
+    return 1 if FAIL else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

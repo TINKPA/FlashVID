@@ -32,6 +32,7 @@ def assemble(
     retain_idx: list[torch.Tensor],
     merged: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
     expected_total: int | None = None,
+    masses: list[torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build the compressed sequence.
 
@@ -41,9 +42,15 @@ def assemble(
         merged: per frame, ``(features [k, D], seed_idx [k])``. Merged tokens
             inherit their seed's position (spec §2.2), never a coordinate average.
         expected_total: if given, assert the output has exactly this many tokens.
+        masses: per frame, the group size of each merged token (BudgetVID 2.0).
+            When given, the return gains a third element carrying those masses
+            in the SAME order as the tokens -- they have to travel through this
+            one sort with the tokens, or the log-mass bias lands on the wrong
+            keys, which is a silent accuracy loss rather than an error.
 
     Returns:
-        ``(tokens, global_indices)`` sorted by global index.
+        ``(tokens, global_indices)``, or ``(tokens, global_indices, mass)`` when
+        ``masses`` is given, sorted by global index.
     """
     L, N_f, D = video_features.shape
     if len(retain_idx) != L:
@@ -51,7 +58,7 @@ def assemble(
     if merged is not None and len(merged) != L:
         raise ValueError(f"merged has {len(merged)} frames, features have {L}")
 
-    feats, gidx = [], []
+    feats, gidx, mass = [], [], []
     for t in range(L):
         keep = retain_idx[t]
         if keep.numel():
@@ -59,6 +66,9 @@ def assemble(
                 raise ValueError(f"frame {t}: retain index out of range [0,{N_f})")
             feats.append(video_features[t, keep])
             gidx.append(t * N_f + keep.to(torch.long))
+            if masses is not None:
+                # a retained token is a group of one, not a special case
+                mass.append(torch.ones(keep.numel(), device=keep.device))
         if merged is not None:
             mfeat, mseed = merged[t]
             if mfeat.numel():
@@ -66,6 +76,10 @@ def assemble(
                     raise ValueError(f"frame {t}: {mfeat.shape[0]} merged tokens vs {mseed.shape[0]} seeds")
                 feats.append(mfeat.to(video_features.dtype))
                 gidx.append(t * N_f + mseed.to(torch.long))
+                if masses is not None:
+                    if masses[t].shape[0] != mfeat.shape[0]:
+                        raise ValueError(f"frame {t}: {mfeat.shape[0]} merged tokens vs {masses[t].shape[0]} masses")
+                    mass.append(masses[t].float())
 
     if not feats:
         raise ValueError("assemble produced no tokens; every frame was emptied")
@@ -83,4 +97,6 @@ def assemble(
         raise AssertionError(f"assembled {tokens.shape[0]} tokens, budget said {expected_total}")
 
     order = g.argsort()
+    if masses is not None:
+        return tokens[order], g[order], torch.cat(mass, 0)[order]
     return tokens[order], g[order]

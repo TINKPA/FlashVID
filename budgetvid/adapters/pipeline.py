@@ -23,12 +23,14 @@ from ..core.assembly import assemble
 from ..core.budget import split_budget
 from ..core.merging import seeded_merge
 from ..core.policies import attn_top_keep, random_drop_keep, uniform_keep
+from ..core.quantize import compress_video, curve_cost
 from ..core.routing import route_tokens
 from ..core.scoring import score_tokens
+from ..mass_bias import clear_mass
 from ..recording import dump_record, frame_stats, make_tag
 
 POLICIES = ("none", "random_drop", "uniform", "threeway", "prune_only", "merge_only",
-            "attn_top", "attn_top_nosink")
+            "attn_top", "attn_top_nosink", "mq")
 
 _ASSETS = pathlib.Path(__file__).resolve().parents[1] / "assets"
 
@@ -100,6 +102,9 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
     L, N_f, _ = video_features.shape
     policy = getattr(flashvid_config, "policy", "none")
     device = video_features.device
+    # Every sample starts with no mass: a stale vector from the previous video
+    # would bias the wrong keys and never raise.
+    clear_mass(flashvid_config)
 
     if policy == "none":
         g = torch.arange(L * N_f, dtype=torch.long, device=device)
@@ -148,7 +153,11 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
                         frame_stats(cls_attention))
         return tokens, g
 
-    # ---- the method itself: score -> route -> merge -> assemble ----
+    if policy == "mq":
+        return _measure_quantization(video_features, cls_attention, flashvid_config,
+                                     b_t, B, L, N_f)
+
+    # ---- v0: score -> route -> merge -> assemble ----
     cfg = flashvid_config
     # Grid shape: Qwen3-VL's native-resolution grid is not square; its modeling
     # code stores (H, W) on the config before compress() (spec v1.3 §2.1). The
@@ -225,6 +234,91 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
         _dump_threeway(dump_dir, cfg, policy, r, B, grid, cls_attention, I_used,
                        sc, rt, absorb, b_t, g, L, N_f)
     return tokens, g
+
+
+def _lift_params(cfg, device, dtype):
+    """The frozen projections Phi needs, as captured by ``budgetvid()``.
+
+    Returns ``(W_k, W_v, g)``, any of which may be None: ``lift="none"`` measures
+    in the projector space (the metric ablation), ``lift="key"`` drops the value
+    half, ``lift_norm=False`` drops the RMSNorm gain.
+    """
+    mode = str(getattr(cfg, "lift", "kv"))
+    if mode == "none":
+        return None, None, None
+    lp = getattr(cfg, "lift_params", None)
+    if not lp:
+        raise RuntimeError(
+            "policy='mq' needs the decoder's layer-0 k_proj/v_proj/input_layernorm, "
+            "which budgetvid() captures at patch time. None were found -- either "
+            "the model was patched by flashvid() directly, or its first decoder "
+            "layer does not expose k_proj (see budgetvid/__init__.py:_capture_lift).")
+    W_k = lp["W_k"].to(device)
+    W_v = lp["W_v"].to(device) if mode != "key" else None
+    g = lp["g"].to(device) if bool(getattr(cfg, "lift_norm", True)) else None
+    return W_k, W_v, g
+
+
+def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
+    """BudgetVID 2.0: CBA allocation + mass-preserving quantization.
+
+    The per-frame split ``b_t`` computed by the caller is NOT used when
+    ``mq_alloc="waterfill"`` -- CBA replaces it -- but it is what
+    ``mq_alloc="even"`` falls back to, which is exactly the v0 allocation and so
+    isolates what the allocation alone is worth.
+    """
+    W_k, W_v, g = _lift_params(cfg, video_features.device, video_features.dtype)
+    out = compress_video(
+        video_features, B, W_k=W_k, W_v=W_v, g=g,
+        gamma_v=float(getattr(cfg, "gamma_v", 1.0)),
+        alloc=str(getattr(cfg, "mq_alloc", "waterfill")),
+        centroid=str(getattr(cfg, "centroid", "rms")),
+        b_max=int(getattr(cfg, "b_max", 0)),
+    )
+    spent = int(out["b"].sum())
+    empty = [torch.empty(0, dtype=torch.long, device=video_features.device)] * L
+    merged = list(zip(out["feats"], out["seed_idx"]))
+    tokens, gidx, mass = assemble(video_features, empty, merged=merged,
+                                  expected_total=spent, masses=out["mass"])
+    cfg.visual_token_length = int(tokens.shape[0])
+    # The mass channel. Off is the mandatory ablation (a conventional
+    # mass-destroying merge), and it must travel this same code path so the two
+    # rows differ in one thing only.
+    cfg.token_mass = mass if bool(getattr(cfg, "mass", True)) else None
+
+    dump_dir = str(getattr(cfg, "dump_dir", "") or "")
+    if dump_dir:
+        # The counterfactual allocation costs nothing to evaluate: D_t(b) is the
+        # realized cost at every size, so the allocation we did NOT take is a
+        # lookup on curves we already have. This is what answers P2 of the
+        # offline-replay note (does water-filling beat the even split on
+        # quantization cost, and by how much) as a by-product of the run itself.
+        b_alt = split_budget(B, L, N_f).to(out["b"].device) \
+            if str(getattr(cfg, "mq_alloc", "waterfill")) == "waterfill" else out["b"]
+        cost_even = curve_cost(out["D"], b_alt)
+        cost_wf = curve_cost(out["D"], out["b"])
+        b_full = torch.zeros(L, N_f, dtype=torch.int32)
+        for t, mm in enumerate(out["mass"]):
+            b_full[t, out["seed_idx"][t].cpu().long()] = mm.cpu().to(torch.int32)
+        dump_record(dump_dir, make_tag(cfg),
+                    {"I_raw": cls_attention, "radius": out["radius"],
+                     "D": out["D"], "r_curve": out["r"]},
+                    {"mass_map": b_full, "kept_g": gidx, "b_t": out["b"],
+                     "b_even": b_t},
+                    {"method": "bv", "policy": "mq", "L": L, "N_f": N_f,
+                     "retention_ratio": float(cfg.retention_ratio), "B": B,
+                     "B_spent": spent,
+                     "lift": str(getattr(cfg, "lift", "kv")),
+                     "lift_norm": bool(getattr(cfg, "lift_norm", True)),
+                     "gamma_v": float(getattr(cfg, "gamma_v", 1.0)),
+                     "mq_alloc": str(getattr(cfg, "mq_alloc", "waterfill")),
+                     "centroid": str(getattr(cfg, "centroid", "rms")),
+                     "mass": bool(getattr(cfg, "mass", True)),
+                     "cost": out["cost"], "planned": out["planned"],
+                     "cost_taken": cost_wf, "cost_even": cost_even,
+                     "spec": "2026-08-28_method_budgetvid2_v1"},
+                    frame_stats(cls_attention))
+    return tokens, gidx
 
 
 def _dump_threeway(dump_dir, cfg, policy, r, B, grid, cls_attention, I_used,

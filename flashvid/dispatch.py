@@ -27,6 +27,7 @@ DEFAULT_METHOD = "flashvid"
 
 _COMPRESSION_REGISTRY: Dict[str, Callable] = {}
 _LLM_PRUNING_REGISTRY: Dict[str, Callable] = {}
+_SCORE_BIAS_REGISTRY: Dict[str, Callable] = {}
 
 
 def register_compression(name: str, fn: Callable) -> None:
@@ -38,6 +39,23 @@ def register_compression(name: str, fn: Callable) -> None:
             flashvid_config=...)``, returning ``(tokens, global_indices)``.
     """
     _COMPRESSION_REGISTRY[name] = fn
+
+
+def register_score_bias(name: str, fn: Callable) -> None:
+    """Register an additive attention-score bias under ``name``.
+
+    Called once per decoder forward, right after the causal mask is built and
+    before any layer sees it, so a returned mask reaches every layer, head and
+    query, in prefill and in decode alike. Methods that need no bias register
+    nothing; the default is the identity.
+
+    Args:
+        name (str): The method name, matched against ``config.method``.
+        fn (Callable): Called as ``fn(causal_mask=..., hidden_states=...,
+            cache_position=..., flashvid_config=...)``, returning the mask to
+            use (possibly a freshly materialized float mask).
+    """
+    _SCORE_BIAS_REGISTRY[name] = fn
 
 
 def register_llm_pruning(name: str, fn: Callable) -> None:
@@ -103,6 +121,22 @@ def prune(flashvid_config: FlashVidConfig, **kwargs):
     method = _method_of(flashvid_config)
     fn = _resolve(_LLM_PRUNING_REGISTRY, method, "inner-LLM pruning")
     return fn(flashvid_config=flashvid_config, **kwargs)
+
+
+def score_bias(causal_mask, hidden_states, cache_position, flashvid_config: FlashVidConfig):
+    """Dispatch the additive attention-score bias to the active method.
+
+    Unregistered methods pass the mask through untouched, which is why this can
+    sit unconditionally in the patched decoder forwards.
+
+    Returns:
+        The attention mask the decoder layers should use.
+    """
+    fn = _SCORE_BIAS_REGISTRY.get(_method_of(flashvid_config))
+    if fn is None:
+        return causal_mask
+    return fn(causal_mask=causal_mask, hidden_states=hidden_states,
+              cache_position=cache_position, flashvid_config=flashvid_config)
 
 
 register_compression(DEFAULT_METHOD, flashvid_compression)

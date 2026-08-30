@@ -41,6 +41,29 @@ class BudgetVidConfig(FlashVidConfig):
     debias_pos: bool = field(default=False)
     force_alpha: float = field(default=-1.0) # <0 means "unset"
 
+    # --- BudgetVID 2.0 (measure quantization), spec 2026-08-28_method_budgetvid2_v1 ---
+    # Metric space the grouping decisions are taken in (spec eq 1):
+    #   "kv"   -> (W_k RN(x), sqrt(gamma_v) W_v RN(x)), the default
+    #   "key"  -> key half only (gamma_v = 0)
+    #   "none" -> the projector space itself, the metric ablation
+    lift: str = field(default="kv")
+    gamma_v: float = field(default=1.0)
+    # RMSNorm inside the lift. On by default because the key the decoder forms
+    # is W_k RN(x) and never W_k x; off is the pre-freeze norm-free variant.
+    lift_norm: bool = field(default=True)
+    # "waterfill" (CBA, spec eq 3) or "even" (v0's largest remainder), which is
+    # the allocation ablation and must reproduce v0's split exactly.
+    mq_alloc: str = field(default="waterfill")
+    # "rms" delivers the metric centroid's direction at the group's mean token
+    # norm (L1'); "plain" is the unweighted mean every prior merge uses.
+    centroid: str = field(default="rms")
+    # Cap on the cost-curve length; 0 means N_f (exact curves).
+    b_max: int = field(default=0)
+    # The mass channel (spec eq 5). False is the mandatory ablation: a
+    # conventional mass-destroying merge. Requires an attention implementation
+    # that accepts an additive mask -- sdpa or eager, never flash_attention_2.
+    mass: bool = field(default=True)
+
     # Raise if a policy hands out more tokens than the global budget allows.
     # Overspending silently would invalidate every comparison against a
     # fixed-ratio baseline, so this defaults to on.

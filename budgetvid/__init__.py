@@ -45,16 +45,19 @@ _HEAVY = {"BudgetVidConfig", "register_allocation", "available_allocations"}
 def _load_heavy():
     """Import the FlashVID-dependent half and perform dispatch registration."""
     global nn, _apply_flashvid, register_compression, register_llm_pruning
+    global register_score_bias, apply_mass_bias
     global fastv_prune, available_allocations, register_allocation
     global budgetvid_compression, BudgetVidConfig, _loaded
 
     from torch import nn  # noqa: F811
 
     from flashvid import flashvid as _apply_flashvid  # noqa: F811
-    from flashvid.dispatch import register_compression, register_llm_pruning  # noqa: F811
+    from flashvid.dispatch import (  # noqa: F811
+        register_compression, register_llm_pruning, register_score_bias)
     from flashvid.utils import fastv_prune  # noqa: F811
 
     from .allocation import available_allocations, register_allocation  # noqa: F811
+    from .mass_bias import apply_mass_bias  # noqa: F811
     from .compression import budgetvid_compression  # noqa: F811
     from .configuration_budgetvid import BudgetVidConfig  # noqa: F811
     from .adapters.pipeline import budgetvid_pipeline, no_llm_pruning  # noqa: F811
@@ -67,6 +70,9 @@ def _load_heavy():
     # `bv` has a single budget by construction, so the inner-LLM stage is a
     # no-op. Without this the dispatch raises KeyError at `pruning_layer`.
     register_llm_pruning("bv", no_llm_pruning)
+    # The mass channel of BudgetVID 2.0 (spec eq 5). A no-op for every policy
+    # that leaves `token_mass` unset, so the other rows are untouched.
+    register_score_bias("bv", apply_mass_bias)
     # The inner-LLM stage is FlashVID's for now. Note that it is a *second*,
     # independent budget: the vision side keeps `retention_ratio * expansion` of
     # the tokens, then layer `pruning_layer` cuts to `llm_retention_ratio` of
@@ -112,12 +118,46 @@ def _retarget_config(model, config) -> int:
     return replaced
 
 
+def _capture_lift(model) -> dict | None:
+    """Grab the frozen tensors the 2.0 metric lift measures distances through.
+
+    The decoder's FIRST layer is the one whose attention read the guarantee is
+    stated for, so this walks the module tree and takes the first decoder layer
+    it finds that exposes ``self_attn.k_proj`` and ``input_layernorm``. That is
+    the text stack on every model ``flashvid()`` supports -- the vision blocks
+    of Qwen2.5-VL/Qwen3-VL fuse their projections into one ``qkv``, so they
+    cannot match by accident.
+
+    References, not copies: the tensors follow the model's device and dtype, and
+    nothing here is ever written to.
+
+    Returns:
+        ``{"W_k", "W_v", "g", "eps"}`` or None when no such layer exists (which
+        is fine unless a policy asks for a lift, where it becomes an error).
+    """
+    for module in model.modules():
+        attn = getattr(module, "self_attn", None)
+        ln = getattr(module, "input_layernorm", None)
+        if attn is None or ln is None or not hasattr(attn, "k_proj"):
+            continue
+        return {
+            "W_k": attn.k_proj.weight.detach(),
+            "W_v": attn.v_proj.weight.detach(),
+            "g": ln.weight.detach(),
+            "eps": float(getattr(ln, "variance_epsilon", getattr(ln, "eps", 1e-6))),
+        }
+    return None
+
+
 def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: bool = True,
               policy: str | None = None, seed: int = 42,
               eta: float = 0.5, lam: float = 1.0,
               alpha_min: float = 0.4, alpha_max: float = 0.8,
               active_frac: float = 0.6, alpha_flip: bool = False,
               force_alpha: float = -1.0, debias_pos: bool = False,
+              lift: str = "kv", gamma_v: float = 1.0, lift_norm: bool = True,
+              mq_alloc: str = "waterfill", centroid: str = "rms",
+              b_max: int = 0, mass: bool = True,
               dump_dir: str = "",
               **flashvid_kwargs) -> nn.Module:
     """Apply BudgetVID to the model.
@@ -135,6 +175,16 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
             policy -- "none", "random_drop", "uniform". Leaving it None keeps
             the allocation-based path.
         seed (int, optional): Seed for policies with a random component.
+        lift (str, optional): Metric space for policy ``mq`` -- "kv", "key" or
+            "none". See BudgetVidConfig for what each means.
+        gamma_v (float, optional): Weight of the value half of the lift.
+        lift_norm (bool, optional): Put the decoder's input RMSNorm inside the
+            lift, which is the geometry the decoder actually reads.
+        mq_alloc (str, optional): "waterfill" (CBA) or "even" (v0's split).
+        centroid (str, optional): "rms" or "plain".
+        b_max (int, optional): Cost-curve length cap; 0 means N_f.
+        mass (bool, optional): The log-mass attention bias. Turning it off is
+            the mandatory ablation and needs no other change.
         dump_dir (str, optional): When set, every compressed video's signals
             and routing decisions are dumped there (budgetvid/recording.py).
             The eval wrapper sets ``dump_tag`` on the config per sample.
@@ -167,7 +217,22 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
         eta=eta, lam=lam, alpha_min=alpha_min, alpha_max=alpha_max,
         active_frac=active_frac, alpha_flip=alpha_flip, force_alpha=force_alpha,
         debias_pos=debias_pos, dump_dir=dump_dir,
+        lift=lift, gamma_v=gamma_v, lift_norm=lift_norm, mq_alloc=mq_alloc,
+        centroid=centroid, b_max=b_max, mass=mass,
     )
+    if policy == "mq":
+        # The log-mass bias rides on an additive attention mask, which
+        # flash_attention_2 cannot take. Catching it here beats discovering it
+        # as a silently unbiased -- and therefore wrong -- benchmark number.
+        impl = getattr(model.config, "_attn_implementation", None)
+        if mass and impl == "flash_attention_2":
+            raise ValueError(
+                "policy='mq' with mass=True needs attn_implementation='sdpa' (or "
+                "'eager'); flash_attention_2 takes no additive score bias. Pass "
+                "attn_implementation=sdpa in the model args, or run mass=False "
+                "for the mass-destroying ablation.")
+        config.lift_params = _capture_lift(model)
+        config.token_mass = None
     if policy is not None:
         # Route to budgetvid/adapters/pipeline.py rather than the allocation path.
         config.method = "bv"
