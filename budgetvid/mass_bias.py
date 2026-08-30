@@ -78,6 +78,14 @@ def apply_mass_bias(causal_mask, hidden_states, cache_position, flashvid_config)
 
     beta = m.to(device=device, dtype=torch.float32).clamp(min=1.0).log().to(dtype)
     mask[..., start:start + n_vis] += beta
+    if not getattr(flashvid_config, "_mass_logged", False):
+        # Once per process. The bias landing on the wrong slice, or not landing
+        # at all, is the failure mode that produces a plausible number instead
+        # of an error, so the span and the mass range go in the run log.
+        flashvid_config._mass_logged = True
+        print(f"[BV] log-mass bias live: keys [{start}, {start + n_vis}) of {kv_len}, "
+              f"m in [{int(m.min())}, {int(m.max())}], beta max {float(beta.max()):.2f}",
+              flush=True)
     return mask
 
 

@@ -277,6 +277,12 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
                 "switch. Check budgetvid/__init__.py:_text_stack_to_sdpa against "
                 "this model's layout.")
         config.attn_text = "sdpa"
+        # Printed, not assumed: if this switch ever silently fails to happen,
+        # the log-mass bias is silently not applied, and the mass row becomes
+        # the ablation row wearing the method's name.
+        print(f"[BV] decoder moved to sdpa for the log-mass bias "
+              f"({n} config objects); vision tower stays on flash_attention_2",
+              flush=True)
     if policy == "mq":
         config.lift_params = _capture_lift(model)
         config.token_mass = None

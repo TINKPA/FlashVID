@@ -39,10 +39,14 @@ lift_norm=False   # drop the RMSNorm from the lift
 centroid=plain    # unweighted mean instead of the metric centroid direction
 ```
 
-`attn_implementation=sdpa` is **required** while `mass=True`: the bias rides on
-an additive attention mask and flash_attention_2 does not take one. Passing FA2
-raises at patch time rather than silently producing an unbiased -- and therefore
-wrong -- number.
+**Two attention backends, on purpose.** The bias rides on an additive attention
+mask and flash_attention_2 does not take one, so `budgetvid()` moves the decoder
+to sdpa whenever `mass=True`. It moves *only* the decoder: the vision tower
+asserts FA2 (`flashvid/modeling_qwen2_5_vl.py:560`) because the varlen
+`cu_seqlens` path is how the [CLS] attention every policy scores with is
+extracted -- loading the whole model under sdpa dies in the encoder, before
+compression is reached. `text_sdpa=True` performs the switch on its own, for
+running a non-2.0 policy as a backend control.
 
 Three things about 2.0 fail silently rather than loudly, so they have tests
 (`tests/test_mq.py`, `tests/test_mq_pipeline.py`, 48 checks, no GPU):
