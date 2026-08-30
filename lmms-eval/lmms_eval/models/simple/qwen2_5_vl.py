@@ -175,6 +175,9 @@ class Qwen2_5_VL(lmms):
                 pruning_layer=pruning_layer,
                 llm_retention_ratio=llm_retention_ratio,
             )
+        # Stash the compression config before accelerate wraps the model, so the
+        # chat wrapper can tag each dump with its video (see chat/qwen3_vl.py).
+        self._bv_cfg = getattr(self._model, "flashvid_config", None)
         if enable_flashvid:
             from flashvid import flashvid
 

@@ -1,3 +1,4 @@
+import os
 import time
 from typing import List
 
@@ -63,6 +64,28 @@ class Qwen2_5_VL(Qwen2_5_VLSimple):
             visuals = self.flatten(visuals)
             videos = self.flatten(videos)
             gen_kwargs = all_gen_kwargs[0]
+
+            # Tag the upcoming compression dump with the video's filename stem,
+            # so npz records join back to questions (one npz per video, not one
+            # per question). Ported from chat/qwen3_vl.py, where the same defect
+            # was found in Round 1: `--model qwen2_5_vl` resolves HERE, and the
+            # tag-setting code lives in the simple parent's generate_until,
+            # which this method overrides. Only unambiguous at batch_size=1.
+            if len(videos) == 1 and isinstance(videos[0], str):
+                _cfg = getattr(self, "_bv_cfg", None)
+                if _cfg is None and hasattr(self._model, "modules"):
+                    for _m in self._model.modules():
+                        _cfg = getattr(_m, "flashvid_config", None)
+                        if _cfg is not None:
+                            break
+                if os.environ.get("BV_DEBUG_TAG"):
+                    print(f"[BV_DEBUG_TAG] chat rank={self._rank} "
+                          f"model={type(self._model).__name__} "
+                          f"stashed={getattr(self, '_bv_cfg', None) is not None} "
+                          f"resolved={_cfg is not None} "
+                          f"video={os.path.basename(videos[0])}", flush=True)
+                if _cfg is not None:
+                    _cfg.dump_tag = os.path.splitext(os.path.basename(videos[0]))[0]
 
             # Apply chat template
             video_kwargs = {
