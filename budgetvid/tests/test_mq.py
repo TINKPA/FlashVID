@@ -222,6 +222,26 @@ def main():
           all(torch.equal(a_, b_) for a_, b_ in zip(
               ref["feats"], compress_video(x, B=3 * L, W_k=W_k, W_v=W_v, g=g,
                                            refine=5)["feats"])))
+    # Smoke for the refinement's invariants on awkward geometry. It is NOT a
+    # regression test for the production failure: several constructions
+    # (bulk-plus-outliers, tight clumps, more centers than clumps) all stayed
+    # clean under the pre-fix code, so the exact trigger was never reproduced.
+    # The guarantee now comes from construction plus an assert inside
+    # lloyd_refine, not from this case.
+    # 24 tight clumps, every token distinct, budget well under the distinct
+    # count -- the regime the failing run was in. Tight clumps are what push two
+    # centers on top of each other, which is what made them name one token.
+    clump = torch.cat([torch.randn(1, 3, d) * 0.01 + torch.randn(1, 1, d)
+                       for _ in range(24)], 1)                     # 72 tokens
+    for it in (1, 3, 8):
+        rr = compress_video(clump, B=20, W_k=W_k, W_v=W_v, g=g, refine=it)
+        si, mm = rr["seed_idx"][0], rr["mass"][0]
+        ok = (si.numel() == len(set(si.tolist())) == int(rr["b"].sum()) == 20
+              and int(mm.sum()) == clump.shape[1] and int(mm.min()) >= 1)
+        check(f"29g0 refine={it} on clumped data: unique positions, no empty group", ok,
+              f"{si.numel()} positions, {len(set(si.tolist()))} unique, "
+              f"mass {int(mm.sum())}/{clump.shape[1]} min {int(mm.min())}")
+
     check("29g delivered positions stay real token positions",
           all(int(si.max()) < N_f and int(si.min()) >= 0 for si in ref["seed_idx"])
           and all(len(set(si.tolist())) == si.numel() for si in ref["seed_idx"]))

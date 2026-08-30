@@ -312,8 +312,39 @@ def lloyd_refine(Kt: torch.Tensor, sid: torch.Tensor, iters: int):
             break
         C = new_C
         a = _assign(Kt, C)
-    d = torch.cdist(Kt.unsqueeze(0), C.unsqueeze(0)).squeeze(0)
-    pos = _argmin_first(d.t())            # medoid of each group
+    # Each group's medoid must come from its OWN members. Taking the nearest
+    # token to each center over ALL tokens lets two centers name the same token,
+    # which delivers two output tokens at one position -- caught in production
+    # by assemble()'s duplicate-index assertion after an hour of GPU, because
+    # nothing else about the run looks wrong.
+    b = C.shape[0]
+    d = torch.cdist(Kt.unsqueeze(0), C.unsqueeze(0)).squeeze(0)          # [N, b]
+    own = a.unsqueeze(1) != torch.arange(b, device=a.device)
+    pos = _argmin_first(d.masked_fill(own, float("inf")).t())
+    counts = torch.bincount(a, minlength=b)
+    if bool((counts == 0).any()):
+        # A center can end up with no members. It still owes one delivered
+        # token, so give it the worst-covered token not already spoken for --
+        # which is also the token that most wants a representative of its own.
+        resid = d.gather(1, a.unsqueeze(1)).squeeze(1).clone()
+        resid[pos[counts > 0]] = -1.0
+        for j in torch.nonzero(counts == 0).flatten().tolist():
+            t = int(_argmax_first(resid.unsqueeze(0)).item())
+            pos[j] = t
+            a[t] = j
+            resid[t] = -1.0
+    # Uniqueness is by construction above -- medoids are drawn from disjoint
+    # groups, and the empty-group fill only takes tokens no medoid has claimed.
+    # It is asserted anyway because the failure it guards against costs an hour
+    # of GPU and surfaces far downstream, in assemble(), as a duplicate global
+    # index. NOTE: the exact input that triggered the original failure was never
+    # reproduced synthetically (bulk-plus-outlier and clumped clouds both stayed
+    # clean under the old code), so this assert is the thing that would catch a
+    # recurrence, not the test suite.
+    if torch.unique(pos).numel() != pos.numel():
+        raise AssertionError(
+            f"lloyd_refine produced {pos.numel() - torch.unique(pos).numel()} duplicate "
+            "medoid positions; groups are disjoint so this should be impossible")
     return a, pos
 
 
