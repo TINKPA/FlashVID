@@ -213,6 +213,27 @@ def main():
           all(int(si.max()) < N_f and int(si.min()) >= 0 for si in ref["seed_idx"])
           and all(len(set(si.tolist())) == si.numel() for si in ref["seed_idx"]))
 
+    # ---- centroid=medoid: a coreset of real tokens, still mass-weighted -----
+    med = compress_video(x, B=3 * L, W_k=W_k, W_v=W_v, g=g, centroid="medoid")
+    check("29h every delivered token is an actual input token",
+          all(any(torch.allclose(f, x[t, i], atol=1e-5) for i in range(N_f))
+              for t, F in enumerate(med["feats"]) for f in F))
+    check("29i medoid delivery keeps the mass and budget invariants",
+          sum(f.shape[0] for f in med["feats"]) == 3 * L
+          and all(int(m_.sum()) == N_f for m_ in med["mass"]))
+    check("29j a medoid represents its own group, so positions stay unique",
+          all(len(set(si.tolist())) == si.numel() for si in med["seed_idx"]))
+    # The cost here is a sum of UNSQUARED distances, whose minimizer is the
+    # geometric median, not the mean -- so a medoid may well cost less than the
+    # centroid, and on this cloud it does. What is guaranteed is the classic
+    # metric k-median bound: swapping the mean for the best real point at most
+    # doubles the cost.
+    check("29k medoid stays within the factor-2 k-median bound",
+          med["cost"] <= 2 * out["cost"] + 1e-3,
+          f"medoid {med['cost']:.2f} vs centroid {out['cost']:.2f}")
+    print(f"      (note: medoid cost {med['cost']:.1f} vs centroid {out['cost']:.1f} "
+          f"-- the medoid is the cheaper representative under the L1-type cost)")
+
     nolift = compress_video(x, B=3 * L)
     check("30 the no-lift ablation runs and still spends B",
           sum(f.shape[0] for f in nolift["feats"]) == 3 * L)

@@ -345,7 +345,26 @@ def quantize_frames(K: torch.Tensor, x: torch.Tensor, s: torch.Tensor,
 
         m = torch.bincount(a, minlength=k)
         num = torch.zeros(k, x.shape[-1], device=x.device, dtype=torch.float32)
-        if centroid == "rms":
+        if centroid == "medoid":
+            # Deliver the group's most central REAL token instead of an average
+            # of its members. The measure being approximated is the same and the
+            # mass channel is unchanged -- this is a weighted coreset of actual
+            # points, which is the form the attention-coreset bounds are stated
+            # for. It exists because a centroid is a vector the language model
+            # has never seen: averaging tokens leaves the manifold the encoder
+            # produces, and at a tight budget each average is over hundreds of
+            # unrelated tokens. Whether that matters is measurable, and this is
+            # the row that measures it.
+            C = torch.zeros(k, K.shape[-1], device=K.device, dtype=torch.float32)
+            C.index_add_(0, a, K[t])
+            C = C / m.clamp(min=1).unsqueeze(-1).float()
+            far = torch.cdist(K[t].unsqueeze(0), C.unsqueeze(0)).squeeze(0)
+            # a token may only represent its own group
+            far = far + (a.unsqueeze(1) != torch.arange(k, device=a.device)) * 1e9
+            med = _argmin_first(far.t())
+            feats.append(x[t, med].float())
+            sid = med
+        elif centroid == "rms":
             # Direction from the metric-space centroid (L1'), magnitude from the
             # group's mean norm. The direction is what the decoder reads: RMSNorm
             # erases whatever magnitude we deliver, so the scale is simply not
