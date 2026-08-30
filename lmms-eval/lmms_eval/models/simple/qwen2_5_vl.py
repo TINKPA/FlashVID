@@ -97,6 +97,7 @@ class Qwen2_5_VL(lmms):
         centroid: str = "rms",
         b_max: int = 0,
         mass: bool = True,
+        text_sdpa: bool = False,
         # Per-video signal/routing dumps (budgetvid/recording.py). Empty = off.
         dump_dir: str = "",
         **kwargs,
@@ -162,6 +163,7 @@ class Qwen2_5_VL(lmms):
                 debias_pos=debias_pos,
                 lift=lift, gamma_v=gamma_v, lift_norm=lift_norm,
                 mq_alloc=mq_alloc, centroid=centroid, b_max=b_max, mass=mass,
+                text_sdpa=text_sdpa,
                 dump_dir=dump_dir,
                 retention_ratio=retention_ratio,
                 expansion=expansion,

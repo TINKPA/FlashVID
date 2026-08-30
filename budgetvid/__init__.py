@@ -149,6 +149,45 @@ def _capture_lift(model) -> dict | None:
     return None
 
 
+def _text_stack_to_sdpa(model) -> int:
+    """Put the LANGUAGE model on sdpa, leaving the vision tower on FA2.
+
+    The log-mass bias is an additive attention-score bias, and
+    flash_attention_2 takes no additive mask -- but the fork's vision tower
+    *requires* FA2: its patched attention asserts it outright
+    (flashvid/modeling_qwen2_5_vl.py:560), because the varlen ``cu_seqlens``
+    path is how it extracts the [CLS] attention that every policy scores with.
+    Loading the whole model under sdpa therefore fails in the encoder, before
+    compression is ever reached.
+
+    The two are separable: transformers keeps one ``_attn_implementation`` per
+    sub-config, read at forward time. Only the decoder needs the bias, so only
+    the decoder is switched, and the encoder keeps the fast varlen kernel.
+
+    Returns:
+        int: how many config objects were switched; 0 means the text stack was
+        not found, which the caller must treat as an error rather than run an
+        unbiased -- and therefore wrong -- benchmark.
+    """
+    for module in model.modules():
+        layers = getattr(module, "layers", None)
+        if layers is None or len(layers) == 0:
+            continue
+        attn = getattr(layers[0], "self_attn", None)
+        if attn is None or not hasattr(attn, "k_proj"):
+            continue          # vision blocks fuse into .attn/qkv, so they can't match
+        seen, n = set(), 0
+        holders = [module, layers[0], attn] + [getattr(l, "self_attn", None) for l in layers]
+        for holder in holders:
+            cfg = getattr(holder, "config", None)
+            if cfg is not None and id(cfg) not in seen:
+                cfg._attn_implementation = "sdpa"
+                seen.add(id(cfg))
+                n += 1
+        return n
+    return 0
+
+
 def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: bool = True,
               policy: str | None = None, seed: int = 42,
               eta: float = 0.5, lam: float = 1.0,
@@ -157,7 +196,7 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
               force_alpha: float = -1.0, debias_pos: bool = False,
               lift: str = "kv", gamma_v: float = 1.0, lift_norm: bool = True,
               mq_alloc: str = "waterfill", centroid: str = "rms",
-              b_max: int = 0, mass: bool = True,
+              b_max: int = 0, mass: bool = True, text_sdpa: bool = False,
               dump_dir: str = "",
               **flashvid_kwargs) -> nn.Module:
     """Apply BudgetVID to the model.
@@ -185,6 +224,11 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
         b_max (int, optional): Cost-curve length cap; 0 means N_f.
         mass (bool, optional): The log-mass attention bias. Turning it off is
             the mandatory ablation and needs no other change.
+        text_sdpa (bool, optional): Move the decoder to sdpa even when nothing
+            requires it. Implied by ``policy="mq"`` with ``mass=True``; set it
+            by hand on a NON-2.0 policy to measure what the backend switch
+            alone costs, which is the only way a 2.0 row can be compared to an
+            older flash_attention_2 row with a number rather than a hope.
         dump_dir (str, optional): When set, every compressed video's signals
             and routing decisions are dumped there (budgetvid/recording.py).
             The eval wrapper sets ``dump_tag`` on the config per sample.
@@ -220,17 +264,20 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
         lift=lift, gamma_v=gamma_v, lift_norm=lift_norm, mq_alloc=mq_alloc,
         centroid=centroid, b_max=b_max, mass=mass,
     )
+    # Load the model under flash_attention_2 as usual -- the vision tower
+    # demands it -- and move only the decoder to sdpa, which is what can carry
+    # the additive log-mass bias. Failing loudly here beats discovering it as a
+    # silently unbiased benchmark number.
+    if text_sdpa or (policy == "mq" and mass):
+        n = _text_stack_to_sdpa(model)
+        if n == 0:
+            raise RuntimeError(
+                "the language model has to be on sdpa here (flash_attention_2 takes "
+                "no additive score bias), but no text decoder stack was found to "
+                "switch. Check budgetvid/__init__.py:_text_stack_to_sdpa against "
+                "this model's layout.")
+        config.attn_text = "sdpa"
     if policy == "mq":
-        # The log-mass bias rides on an additive attention mask, which
-        # flash_attention_2 cannot take. Catching it here beats discovering it
-        # as a silently unbiased -- and therefore wrong -- benchmark number.
-        impl = getattr(model.config, "_attn_implementation", None)
-        if mass and impl == "flash_attention_2":
-            raise ValueError(
-                "policy='mq' with mass=True needs attn_implementation='sdpa' (or "
-                "'eager'); flash_attention_2 takes no additive score bias. Pass "
-                "attn_implementation=sdpa in the model args, or run mass=False "
-                "for the mass-destroying ablation.")
         config.lift_params = _capture_lift(model)
         config.token_mass = None
     if policy is not None:

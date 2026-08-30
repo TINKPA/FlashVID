@@ -63,6 +63,10 @@ class BudgetVidConfig(FlashVidConfig):
     # conventional mass-destroying merge. Requires an attention implementation
     # that accepts an additive mask -- sdpa or eager, never flash_attention_2.
     mass: bool = field(default=True)
+    # Set by budgetvid() when the decoder is moved to sdpa for the mass bias.
+    # Recorded rather than assumed, so a run's metadata says which backend the
+    # LANGUAGE model actually used (the vision tower stays on FA2 either way).
+    attn_text: str = field(default="")
 
     # Raise if a policy hands out more tokens than the global budget allows.
     # Overspending silently would invalidate every comparison against a
