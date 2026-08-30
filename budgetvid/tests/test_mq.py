@@ -85,6 +85,19 @@ def main():
     check("10 a duplicated frame saturates at its distinct count",
           float(rd[0, 2]) < 1e-4 and float(rd[0, 1]) > 1e-4)
 
+    # A saturated frame under the EVEN split is where seeds used to repeat: the
+    # residual is all zeros, so "farthest point" has nothing to say, and two
+    # seeds landing on one index means two output tokens claiming one position.
+    # Water-filling's saturation exit hides it; the ablation path does not.
+    dup3 = x[0, :3].repeat(8, 1).unsqueeze(0).repeat(4, 1, 1)      # 4 frames x 24
+    _s, _, _ = fps_curves(metric_lift(dup3, W_k, W_v, g)[0], N_f)
+    check("10b seeds stay unique even after the frame saturates",
+          all(len(set(_s[t].tolist())) == _s.shape[1] for t in range(4)))
+    sat = compress_video(dup3, B=40, W_k=W_k, W_v=W_v, g=g, alloc="even")
+    idx = [set((t * N_f + si).tolist()) for t, si in enumerate(sat["seed_idx"])]
+    check("10c the even split survives a saturated frame",
+          sum(len(i) for i in idx) == 40 and len(set().union(*idx)) == 40)
+
     # ---- envelope --------------------------------------------------------
     Db = lower_convex_envelope(D)
     check("11 envelope lies at or below the curve", bool((Db <= D + 1e-3).all()))

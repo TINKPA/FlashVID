@@ -133,7 +133,19 @@ def fps_curves(K: torch.Tensor, b_max: int):
     # Seed 1 is the token farthest from the frame's mean -- deterministic, and
     # the reason this needs no RNG at all.
     delta = (K - K.mean(1, keepdim=True)).norm(dim=-1)
-    seeds[:, 0] = _argmax_first(delta)
+    # Once a frame saturates -- every remaining token is an exact duplicate of
+    # some seed -- the residual is all zeros and "farthest point" stops meaning
+    # anything: the plain argmax then returns the SAME index at every further
+    # step, and two seeds sharing an index means two output tokens claiming one
+    # position. Water-filling never gets there (its saturation exit stops
+    # spending on such a frame), but the even-split ablation has no such guard
+    # and hit exactly this. Masking what is already taken keeps the seed
+    # sequence a permutation prefix unconditionally, and changes nothing before
+    # saturation, where the residuals are positive and the mask is inert.
+    taken = torch.zeros(L, N_f, dtype=torch.bool, device=K.device)
+    first = _argmax_first(delta)
+    seeds[:, 0] = first
+    taken.scatter_(1, first.unsqueeze(1), True)
 
     for b in range(b_max):
         cur = K.gather(1, seeds[:, b, None, None].expand(-1, 1, K.shape[-1]))
@@ -142,7 +154,9 @@ def fps_curves(K: torch.Tensor, b_max: int):
         D[:, b] = delta.sum(1)
         r[:, b] = delta.max(1).values
         if b + 1 < b_max:
-            seeds[:, b + 1] = _argmax_first(delta)
+            nxt = _argmax_first(delta.masked_fill(taken, -1.0))
+            seeds[:, b + 1] = nxt
+            taken.scatter_(1, nxt.unsqueeze(1), True)
     return seeds, D, r
 
 
