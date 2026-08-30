@@ -118,11 +118,27 @@ def main():
     check("10 a float mask is added to, not replaced",
           abs(float(out[0, 0, 0, 2]) - float(torch.tensor(3.0).log())) < 1e-4)
 
-    # decode: one query, the whole cache as keys, same slice
-    dec = apply_mass_bias(None, torch.zeros(1, 1, d), torch.tensor([9]), ch)
-    check("11 the bias survives into decode",
+    # decode: one query, the whole cache as keys, same slice. The key count
+    # comes from the CACHE, never from cache_position's values -- after
+    # compression those are original sequence positions (~N), while the cache
+    # holds the compressed sequence (~B). Reading them as lengths would size the
+    # mask by the uncompressed video.
+    class _Cache:
+        def __init__(self, n): self.n = n
+        def get_seq_length(self): return self.n
+
+    dec = apply_mass_bias(None, torch.zeros(1, 1, d), torch.tensor([9481]), ch,
+                          past_key_values=_Cache(9))
+    check("11 the bias survives into decode, sized by the cache",
           dec.shape == (1, 1, 1, 10)
-          and abs(float(dec[0, 0, 0, 2]) - float(torch.tensor(3.0).log())) < 1e-4)
+          and abs(float(dec[0, 0, 0, 2]) - float(torch.tensor(3.0).log())) < 1e-4,
+          f"shape {tuple(dec.shape)}")
+    check("11b the fallback mask is causal over key SLOTS, not over positions",
+          float(dec[0, 0, 0, 9]) > -1e30)
+    pre = apply_mass_bias(None, torch.zeros(1, 6, d), torch.arange(9000, 9006), ch)
+    check("11c prefill with no cache spans exactly the queries",
+          pre.shape == (1, 1, 6, 6) and float(pre[0, 0, 0, 3]) < -1e30
+          and float(pre[0, 0, 3, 3]) > -1e30, f"shape {tuple(pre.shape)}")
 
     ch_off = cfg(token_mass=None)
     check("12 no mass means the mask passes through untouched",

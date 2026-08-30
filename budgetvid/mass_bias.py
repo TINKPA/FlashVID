@@ -25,7 +25,8 @@ from __future__ import annotations
 import torch
 
 
-def apply_mass_bias(causal_mask, hidden_states, cache_position, flashvid_config):
+def apply_mass_bias(causal_mask, hidden_states, cache_position, flashvid_config,
+                    past_key_values=None):
     """Add ``log m`` to the scores of the compressed visual keys.
 
     Registered as method ``bv``'s score bias, so it is called once per decoder
@@ -39,9 +40,16 @@ def apply_mass_bias(causal_mask, hidden_states, cache_position, flashvid_config)
             implementation is using an implicit causal mask), a bool mask
             (True = attend), or an additive float mask.
         hidden_states: [bsz, q_len, d], for dtype/device/length.
-        cache_position: [q_len] absolute positions of the queries.
+        cache_position: [q_len] positions of the queries. NOTE these are the
+            ORIGINAL sequence positions, not indices into the compressed
+            sequence: the patched forward slices cache_position by the kept
+            global indices without renumbering, so on a compressed video its
+            last value is ~N, not ~B. It is therefore usable for counting
+            queries and nothing else here.
         flashvid_config: carries ``token_mass``, ``visual_token_start_index``
             and ``visual_token_length``.
+        past_key_values: only needed on the fallback path, to learn how many
+            keys precede this forward's queries.
 
     Returns:
         The mask to hand the decoder layers: unchanged when there is no mass to
@@ -55,7 +63,11 @@ def apply_mass_bias(causal_mask, hidden_states, cache_position, flashvid_config)
     n_vis = int(m.numel())
     dtype, device = hidden_states.dtype, hidden_states.device
     bsz, q_len = hidden_states.shape[0], hidden_states.shape[1]
-    kv_len = int(cache_position[-1]) + 1 if cache_position is not None else q_len
+    if causal_mask is not None:
+        kv_len = causal_mask.shape[-1]
+    else:
+        past = past_key_values.get_seq_length() if past_key_values is not None else 0
+        kv_len = int(past) + q_len
 
     if start + n_vis > kv_len:
         raise ValueError(
@@ -66,8 +78,11 @@ def apply_mass_bias(causal_mask, hidden_states, cache_position, flashvid_config)
         # The implementation was going to rely on an implicit causal mask, so
         # materialize it. Cheap here: the sequence is already compressed, so
         # this is a few hundred tokens squared, not the raw visual stream.
-        pos = cache_position if cache_position is not None else torch.arange(q_len, device=device)
-        allowed = pos[:, None] >= torch.arange(kv_len, device=device)[None, :]
+        # Over KEY SLOTS, not over cache_position's values: after compression
+        # those values are original positions and index nothing in this
+        # sequence. Query i of this forward sits at slot (kv_len - q_len + i).
+        q_slot = torch.arange(kv_len - q_len, kv_len, device=device)
+        allowed = q_slot[:, None] >= torch.arange(kv_len, device=device)[None, :]
         mask = torch.zeros(bsz, 1, q_len, kv_len, dtype=dtype, device=device)
         mask.masked_fill_(~allowed[None, None], torch.finfo(dtype).min)
     elif causal_mask.dtype == torch.bool:
@@ -83,7 +98,8 @@ def apply_mass_bias(causal_mask, hidden_states, cache_position, flashvid_config)
         # at all, is the failure mode that produces a plausible number instead
         # of an error, so the span and the mass range go in the run log.
         flashvid_config._mass_logged = True
-        print(f"[BV] log-mass bias live: keys [{start}, {start + n_vis}) of {kv_len}, "
+        print(f"[BV] log-mass bias live: keys [{start}, {start + n_vis}) of {kv_len} "
+              f"(q_len {q_len}), "
               f"m in [{int(m.min())}, {int(m.max())}], beta max {float(beta.max()):.2f}",
               flush=True)
     return mask

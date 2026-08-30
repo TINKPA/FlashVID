@@ -438,7 +438,7 @@ def Qwen3VLTextModel_forward(
         raise ValueError("FlashVid configuration is not set in the model.")
     flashvid_config: FlashVidConfig = getattr(self, "flashvid_config")
     is_prefill = hidden_states.shape[1] > 1
-    attention_mask = score_bias(attention_mask, hidden_states, cache_position, flashvid_config)
+    attention_mask = score_bias(attention_mask, hidden_states, cache_position, flashvid_config, past_key_values)
 
     # decoder layers
     for layer_idx, decoder_layer in enumerate(self.layers):

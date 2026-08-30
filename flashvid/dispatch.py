@@ -123,7 +123,8 @@ def prune(flashvid_config: FlashVidConfig, **kwargs):
     return fn(flashvid_config=flashvid_config, **kwargs)
 
 
-def score_bias(causal_mask, hidden_states, cache_position, flashvid_config: FlashVidConfig):
+def score_bias(causal_mask, hidden_states, cache_position, flashvid_config: FlashVidConfig,
+               past_key_values=None):
     """Dispatch the additive attention-score bias to the active method.
 
     Unregistered methods pass the mask through untouched, which is why this can
@@ -136,7 +137,8 @@ def score_bias(causal_mask, hidden_states, cache_position, flashvid_config: Flas
     if fn is None:
         return causal_mask
     return fn(causal_mask=causal_mask, hidden_states=hidden_states,
-              cache_position=cache_position, flashvid_config=flashvid_config)
+              cache_position=cache_position, flashvid_config=flashvid_config,
+              past_key_values=past_key_values)
 
 
 register_compression(DEFAULT_METHOD, flashvid_compression)
