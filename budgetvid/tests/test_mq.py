@@ -178,6 +178,41 @@ def main():
     plain = compress_video(x, B=3 * L, W_k=W_k, W_v=W_v, g=g, centroid="plain")
     check("29 centroid=plain is a different delivery (ablation wired)",
           not torch.allclose(plain["feats"][0], out["feats"][0], atol=1e-5))
+    # ---- Lloyd refinement (off by default; the frozen v1 path is untouched) --
+    ref = compress_video(x, B=3 * L, W_k=W_k, W_v=W_v, g=g, refine=5)
+    check("29b refine=0 is exactly the frozen behaviour",
+          all(torch.equal(a_, b_) for a_, b_ in
+              zip(compress_video(x, B=3 * L, W_k=W_k, W_v=W_v, g=g, refine=0)["feats"],
+                  out["feats"])))
+    check("29c refinement lowers the cost it is supposed to lower",
+          ref["cost"] < out["cost"], f"{ref['cost']:.3f} vs {out['cost']:.3f}")
+    # The imbalance claim is about clouds with a dense bulk and a sparse tail,
+    # which is what real frames look like and what FPS mishandles: it seeds the
+    # outliers, and one seed then absorbs the whole bulk. On i.i.d. noise there
+    # is no bulk to absorb and nothing to fix, so the claim is tested on the
+    # structure it is about.
+    bulk = torch.randn(1, 200, d) * 0.05
+    tail = torch.randn(1, 24, d) * 4.0
+    struct = torch.cat([bulk, tail], 1)
+    f0 = compress_video(struct, B=8, W_k=W_k, W_v=W_v, g=g)
+    f1 = compress_video(struct, B=8, W_k=W_k, W_v=W_v, g=g, refine=8)
+    m0, m1 = int(f0["mass"][0].max()), int(f1["mass"][0].max())
+    check("29d on a bulk-plus-outliers cloud, refinement breaks up the mega-group",
+          m1 < m0, f"biggest group {m1} vs {m0} of {struct.shape[1]} tokens")
+    check("29d2 and it costs less to do so",
+          f1["cost"] < f0["cost"], f"{f1['cost']:.2f} vs {f0['cost']:.2f}")
+    check("29e refinement keeps every invariant",
+          sum(f.shape[0] for f in ref["feats"]) == 3 * L
+          and all(int(m_.sum()) == N_f for m_ in ref["mass"])
+          and all(int(m_.min()) >= 1 for m_ in ref["mass"]))
+    check("29f refinement is deterministic",
+          all(torch.equal(a_, b_) for a_, b_ in zip(
+              ref["feats"], compress_video(x, B=3 * L, W_k=W_k, W_v=W_v, g=g,
+                                           refine=5)["feats"])))
+    check("29g delivered positions stay real token positions",
+          all(int(si.max()) < N_f and int(si.min()) >= 0 for si in ref["seed_idx"])
+          and all(len(set(si.tolist())) == si.numel() for si in ref["seed_idx"]))
+
     nolift = compress_video(x, B=3 * L)
     check("30 the no-lift ablation runs and still spends B",
           sum(f.shape[0] for f in nolift["feats"]) == 3 * L)

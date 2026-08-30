@@ -59,6 +59,10 @@ class BudgetVidConfig(FlashVidConfig):
     centroid: str = field(default="rms")
     # Cap on the cost-curve length; 0 means N_f (exact curves).
     b_max: int = field(default=0)
+    # Lloyd sweeps after the FPS seeding. 0 is the frozen v1 behaviour; >0 moves
+    # each center to its group's mean, which is what stops one seed absorbing a
+    # frame's dense bulk (see core/quantize.py:lloyd_refine).
+    refine: int = field(default=0)
     # The mass channel (spec eq 5). False is the mandatory ablation: a
     # conventional mass-destroying merge. Requires an attention implementation
     # that accepts an additive mask -- sdpa or eager, never flash_attention_2.

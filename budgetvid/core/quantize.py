@@ -248,8 +248,64 @@ def waterfill(Dbar: torch.Tensor, B: int, r: torch.Tensor | None = None,
 # Stage 2: MPQ -- quantize each frame (spec eq 4, B.5)
 # --------------------------------------------------------------------------
 
+def _assign(Kt: torch.Tensor, C: torch.Tensor) -> torch.Tensor:
+    """Nearest-center assignment, ties to the smallest center index."""
+    return _argmin_first(torch.cdist(Kt.unsqueeze(0), C.unsqueeze(0)).squeeze(0))
+
+
+def lloyd_refine(Kt: torch.Tensor, sid: torch.Tensor, iters: int):
+    """Move the centers to their groups' means, a few times (Lloyd / k-means).
+
+    FPS is a k-CENTER heuristic: it takes the point farthest from everything
+    chosen so far, which is an outlier by construction. That is the right move
+    for the covering radius and the wrong one for the summed cost -- and the
+    summed cost is what T1 bounds the attention error by, and what the
+    allocation optimizes. The visible symptom is group imbalance: the outlier
+    seeds hold a handful of tokens each while one seed absorbs the dense bulk
+    of the frame, whose centroid is then the frame's mean wearing a mass of
+    several hundred.
+
+    Lloyd fixes exactly that: each center moves to its own group's mean, so
+    centers migrate out of the sparse tail and into the mass. It monotonically
+    decreases the k-means objective, which is the one the theory names.
+
+    Args:
+        Kt: [N_f, C] one frame's lifted coordinates.
+        sid: [b] initial center indices (the FPS seeds).
+        iters: how many Lloyd sweeps; 0 returns the FPS assignment unchanged.
+
+    Returns:
+        ``(assign, pos)`` -- the final assignment [N_f], and for each group the
+        index of the token nearest its center (the medoid), which is what
+        carries the delivered token's position identifier. A position has to be
+        a real token's, never a coordinate average (v1.4's rule, inherited).
+    """
+    C = Kt[sid]
+    a = _assign(Kt, C)
+    for _ in range(max(0, iters)):
+        b = C.shape[0]
+        cnt = torch.bincount(a, minlength=b).clamp(min=1).unsqueeze(-1).float()
+        new_C = torch.zeros_like(C)
+        new_C.index_add_(0, a, Kt)
+        new_C = new_C / cnt
+        # An emptied center keeps its old position rather than collapsing to the
+        # origin, which would swallow the whole frame on the next sweep.
+        empty = torch.bincount(a, minlength=b) == 0
+        if empty.any():
+            new_C[empty] = C[empty]
+        if torch.allclose(new_C, C):
+            C = new_C
+            break
+        C = new_C
+        a = _assign(Kt, C)
+    d = torch.cdist(Kt.unsqueeze(0), C.unsqueeze(0)).squeeze(0)
+    pos = _argmin_first(d.t())            # medoid of each group
+    return a, pos
+
+
 def quantize_frames(K: torch.Tensor, x: torch.Tensor, s: torch.Tensor,
-                    seeds: torch.Tensor, b: torch.Tensor, centroid: str = "rms"):
+                    seeds: torch.Tensor, b: torch.Tensor, centroid: str = "rms",
+                    refine: int = 0):
     """Assign every token to its nearest seed and deliver one token per group.
 
     Args:
@@ -273,13 +329,18 @@ def quantize_frames(K: torch.Tensor, x: torch.Tensor, s: torch.Tensor,
     for t in range(L):
         k = int(b[t])
         sid = seeds[t, :k]
-        d = torch.cdist(K[t].unsqueeze(0), K[t, sid].unsqueeze(0)).squeeze(0)  # [N_f, k]
-        a = _argmin_first(d)
-        # Seed self-assignment, stated in the spec as the reason m_j >= 1 holds.
-        # Forcing it also removes the one way a group could come out empty:
-        # two seeds with identical coordinates (duplicate tokens in a static
-        # frame), where the tie-break would hand every token to the first.
-        a = a.clone()
+        if refine:
+            a, sid = lloyd_refine(K[t], sid, refine)
+            a = a.clone()
+        else:
+            d = torch.cdist(K[t].unsqueeze(0), K[t, sid].unsqueeze(0)).squeeze(0)  # [N_f, k]
+            a = _argmin_first(d)
+            # Seed self-assignment, stated in the spec as the reason m_j >= 1
+            # holds. Forcing it also removes the one way a group could come out
+            # empty: two seeds with identical coordinates (duplicate tokens in a
+            # static frame), where the tie-break would hand every token to the
+            # first.
+            a = a.clone()
         a[sid] = torch.arange(k, device=a.device)
 
         m = torch.bincount(a, minlength=k)
@@ -302,13 +363,15 @@ def quantize_frames(K: torch.Tensor, x: torch.Tensor, s: torch.Tensor,
             feats.append(num / m.clamp(min=1).unsqueeze(-1).float())
         seed_idx.append(sid)
         mass.append(m)
-        cost.append(float(d.gather(1, a.unsqueeze(1)).sum()))
+        dd = torch.cdist(K[t].unsqueeze(0), K[t, sid].unsqueeze(0)).squeeze(0)
+        cost.append(float(dd.gather(1, a.unsqueeze(1)).sum()))
     return feats, seed_idx, mass, cost
 
 
 def compress_video(x: torch.Tensor, B: int, W_k=None, W_v=None, g=None,
                    gamma_v: float = 1.0, alloc: str = "waterfill",
-                   centroid: str = "rms", b_max: int = 0, eps: float = 1e-6):
+                   centroid: str = "rms", b_max: int = 0, eps: float = 1e-6,
+                   refine: int = 0):
     """Algorithm 2.0 end to end, on one video's visual tokens.
 
     Args:
@@ -319,6 +382,8 @@ def compress_video(x: torch.Tensor, B: int, W_k=None, W_v=None, g=None,
             kept as the allocation ablation).
         centroid: "rms" or "plain", see ``quantize_frames``.
         b_max: cap on the curve length; 0 means N_f (exact).
+        refine: Lloyd sweeps after the FPS seeding, 0 = off (the frozen v1
+            behaviour). See ``lloyd_refine`` for why this exists.
 
     Returns:
         dict with ``feats``/``seed_idx``/``mass`` (per frame), ``b`` [L],
@@ -344,7 +409,7 @@ def compress_video(x: torch.Tensor, B: int, W_k=None, W_v=None, g=None,
     else:
         raise KeyError(f"unknown allocation '{alloc}'; known: waterfill, even")
 
-    feats, seed_idx, mass, cost = quantize_frames(K, x, s, seeds, b, centroid)
+    feats, seed_idx, mass, cost = quantize_frames(K, x, s, seeds, b, centroid, refine)
     return {"feats": feats, "seed_idx": seed_idx, "mass": mass, "b": b,
             "cost": float(sum(cost)), "planned": planned,
             "radius": torch.stack([r[t, int(b[t]) - 1] for t in range(L)]),

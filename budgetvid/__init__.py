@@ -197,6 +197,7 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
               lift: str = "kv", gamma_v: float = 1.0, lift_norm: bool = True,
               mq_alloc: str = "waterfill", centroid: str = "rms",
               b_max: int = 0, mass: bool = True, text_sdpa: bool = False,
+              refine: int = 0,
               dump_dir: str = "",
               **flashvid_kwargs) -> nn.Module:
     """Apply BudgetVID to the model.
@@ -222,6 +223,8 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
         mq_alloc (str, optional): "waterfill" (CBA) or "even" (v0's split).
         centroid (str, optional): "rms" or "plain".
         b_max (int, optional): Cost-curve length cap; 0 means N_f.
+        refine (int, optional): Lloyd sweeps after FPS seeding; 0 is the
+            frozen v1 behaviour.
         mass (bool, optional): The log-mass attention bias. Turning it off is
             the mandatory ablation and needs no other change.
         text_sdpa (bool, optional): Move the decoder to sdpa even when nothing
@@ -262,7 +265,7 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
         active_frac=active_frac, alpha_flip=alpha_flip, force_alpha=force_alpha,
         debias_pos=debias_pos, dump_dir=dump_dir,
         lift=lift, gamma_v=gamma_v, lift_norm=lift_norm, mq_alloc=mq_alloc,
-        centroid=centroid, b_max=b_max, mass=mass,
+        centroid=centroid, b_max=b_max, mass=mass, refine=refine,
     )
     # Load the model under flash_attention_2 as usual -- the vision tower
     # demands it -- and move only the decoder to sdpa, which is what can carry

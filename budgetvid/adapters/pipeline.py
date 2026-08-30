@@ -274,6 +274,7 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
         alloc=str(getattr(cfg, "mq_alloc", "waterfill")),
         centroid=str(getattr(cfg, "centroid", "rms")),
         b_max=int(getattr(cfg, "b_max", 0)),
+        refine=int(getattr(cfg, "refine", 0)),
     )
     spent = int(out["b"].sum())
     empty = [torch.empty(0, dtype=torch.long, device=video_features.device)] * L
@@ -313,6 +314,7 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
                      "gamma_v": float(getattr(cfg, "gamma_v", 1.0)),
                      "mq_alloc": str(getattr(cfg, "mq_alloc", "waterfill")),
                      "centroid": str(getattr(cfg, "centroid", "rms")),
+                     "refine": int(getattr(cfg, "refine", 0)),
                      "mass": bool(getattr(cfg, "mass", True)),
                      "cost": out["cost"], "planned": out["planned"],
                      "cost_taken": cost_wf, "cost_even": cost_even,
