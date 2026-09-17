@@ -79,6 +79,13 @@ def _load_heavy():
     # what is left. Making the two budgets one allocation is an open thread, and
     # the place to do it is here.
     register_llm_pruning("budgetvid", fastv_prune)
+    # FlashVID itself with the mass channel added (budgetvid/flashvid_mass.py):
+    # the plug-in test of whether log m helps a published merge-based method.
+    from .flashvid_mass import (
+        flashvid_compression_with_mass, fvmass_prune, fvmass_score_bias)
+    register_compression("fvmass", flashvid_compression_with_mass)
+    register_llm_pruning("fvmass", fvmass_prune)
+    register_score_bias("fvmass", fvmass_score_bias)
     _loaded = True
 
 
@@ -271,7 +278,7 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
     # demands it -- and move only the decoder to sdpa, which is what can carry
     # the additive log-mass bias. Failing loudly here beats discovering it as a
     # silently unbiased benchmark number.
-    if text_sdpa or (policy == "mq" and mass):
+    if text_sdpa or (policy in ("mq", "flashvid_mass") and mass):
         n = _text_stack_to_sdpa(model)
         if n == 0:
             raise RuntimeError(
@@ -289,7 +296,12 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
     if policy == "mq":
         config.lift_params = _capture_lift(model)
         config.token_mass = None
-    if policy is not None:
+    if policy == "flashvid_mass":
+        # FlashVID's own compression and pruning, instrumented for the mass
+        # channel (budgetvid/flashvid_mass.py); every FlashVID kwarg still applies.
+        config.token_mass = None
+        config.method = "fvmass"
+    elif policy is not None:
         # Route to budgetvid/adapters/pipeline.py rather than the allocation path.
         config.method = "bv"
 
