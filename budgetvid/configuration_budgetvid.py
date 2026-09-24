@@ -52,7 +52,9 @@ class BudgetVidConfig(FlashVidConfig):
     # is W_k RN(x) and never W_k x; off is the pre-freeze norm-free variant.
     lift_norm: bool = field(default=True)
     # "waterfill" (CBA, spec eq 3) or "even" (v0's largest remainder), which is
-    # the allocation ablation and must reproduce v0's split exactly.
+    # the allocation ablation and must reproduce v0's split exactly. "video"
+    # drops the per-frame split: one FPS over all L*N_f tokens, one-seed floor
+    # per frame (notes/2026-09-24_note_video-level-coreset-design.html).
     mq_alloc: str = field(default="waterfill")
     # "rms" delivers the metric centroid's direction at the group's mean token
     # norm (L1'); "plain" is the unweighted mean every prior merge uses.

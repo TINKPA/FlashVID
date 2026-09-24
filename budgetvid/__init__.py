@@ -227,7 +227,8 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
         gamma_v (float, optional): Weight of the value half of the lift.
         lift_norm (bool, optional): Put the decoder's input RMSNorm inside the
             lift, which is the geometry the decoder actually reads.
-        mq_alloc (str, optional): "waterfill" (CBA) or "even" (v0's split).
+        mq_alloc (str, optional): "waterfill" (CBA), "even" (v0's split), or
+            "video" (one FPS over the whole video, one-seed floor per frame).
         centroid (str, optional): "rms" or "plain".
         b_max (int, optional): Cost-curve length cap; 0 means N_f.
         refine (int, optional): Lloyd sweeps after FPS seeding; 0 is the

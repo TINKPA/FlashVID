@@ -294,10 +294,16 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
         # lookup on curves we already have. This is what answers P2 of the
         # offline-replay note (does water-filling beat the even split on
         # quantization cost, and by how much) as a by-product of the run itself.
-        b_alt = split_budget(B, L, N_f).to(out["b"].device) \
-            if str(getattr(cfg, "mq_alloc", "waterfill")) == "waterfill" else out["b"]
-        cost_even = curve_cost(out["D"], b_alt)
-        cost_wf = curve_cost(out["D"], out["b"])
+        alloc = str(getattr(cfg, "mq_alloc", "waterfill"))
+        if alloc == "video":
+            # One video-level curve, not per-frame ones: there is no per-frame
+            # allocation to price, so both lookups are just the realized cost.
+            cost_even = cost_wf = out["cost"]
+        else:
+            b_alt = split_budget(B, L, N_f).to(out["b"].device) \
+                if alloc == "waterfill" else out["b"]
+            cost_even = curve_cost(out["D"], b_alt)
+            cost_wf = curve_cost(out["D"], out["b"])
         b_full = torch.zeros(L, N_f, dtype=torch.int32)
         for t, mm in enumerate(out["mass"]):
             b_full[t, out["seed_idx"][t].cpu().long()] = mm.cpu().to(torch.int32)

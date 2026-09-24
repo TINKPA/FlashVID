@@ -432,6 +432,98 @@ def quantize_frames(K: torch.Tensor, x: torch.Tensor, s: torch.Tensor,
     return feats, seed_idx, mass, cost
 
 
+def video_fps(K: torch.Tensor, B: int):
+    """Farthest-point sampling over the WHOLE video, with a one-seed floor per frame.
+
+    Every frame first gets its own first FPS seed (the token farthest from the
+    frame's mean, exactly ``fps_curves``' seed 1), so no frame can vanish. The
+    remaining ``B - L`` seeds are then drawn from all ``L * N_f`` tokens at once:
+    each step takes the token farthest from every seed chosen so far, in any
+    frame. Content that repeats across frames sits close together in the lift
+    and is covered by one seed; how many seeds a frame ends up with is decided
+    by this pass, which is why ``alloc="video"`` needs no water-filling.
+
+    Args:
+        K: [L, N_f, C] lifted coordinates.
+        B: total seeds, ``L <= B <= L * N_f``.
+
+    Returns:
+        ``(seeds, D, r)`` -- seeds [B] as GLOBAL indices ``t * N_f + i`` in pick
+        order (the L floor seeds first), and the video-level cost and covering
+        radius curves D, r [B - L + 1] (column 0 = after the floor).
+    """
+    L, N_f, C = K.shape
+    Kf = K.reshape(L * N_f, C)
+    delta0 = (K - K.mean(1, keepdim=True)).norm(dim=-1)
+    floor = _argmax_first(delta0) + torch.arange(L, device=K.device) * N_f
+    seeds = torch.empty(B, dtype=torch.long, device=K.device)
+    seeds[:L] = floor
+    taken = torch.zeros(L * N_f, dtype=torch.bool, device=K.device)
+    taken[floor] = True
+    # Exact norms, one floor seed at a time, as the loop below does -- cdist takes
+    # a matmul path at this size and leaves duplicates a nonzero distance apart.
+    delta = (Kf - Kf[floor[0]]).norm(dim=-1)
+    for f in floor[1:]:
+        delta = torch.minimum(delta, (Kf - Kf[f]).norm(dim=-1))
+    D = torch.empty(B - L + 1, dtype=torch.float32, device=K.device)
+    r = torch.empty(B - L + 1, dtype=torch.float32, device=K.device)
+    D[0], r[0] = delta.sum(), delta.max()
+    for b in range(L, B):
+        nxt = _argmax_first(delta.masked_fill(taken, -1.0).unsqueeze(0)).squeeze(0)
+        seeds[b] = nxt
+        taken[nxt] = True
+        delta = torch.minimum(delta, (Kf - Kf[nxt]).norm(dim=-1))
+        D[b - L + 1], r[b - L + 1] = delta.sum(), delta.max()
+    return seeds, D, r
+
+
+def _quantize_video(K, x, s, B, centroid):
+    """Stage 2 over the whole video: group every token with its nearest seed.
+
+    Reuses ``quantize_frames`` on the video flattened to one "frame", so the
+    delivery (rms / plain / medoid) and the mass are exactly the per-frame code.
+    One addition: with ``centroid="medoid"`` a group may choose a representative
+    in another frame, which could leave a frame with no token at all. The floor
+    groups (the first L seeds) therefore take their medoid from their seed's own
+    frame, which keeps the one-token-per-frame guarantee for every delivery.
+
+    Returns per-frame lists ``(feats, seed_idx, mass)`` and ``(b, cost, radius)``.
+    """
+    L, N_f, C = K.shape
+    seeds, D, r = video_fps(K, B)
+    K1, x1, s1 = K.reshape(1, L * N_f, C), x.reshape(1, L * N_f, -1), s.reshape(1, L * N_f, 1)
+    feats, sid, mass, cost = quantize_frames(K1, x1, s1, seeds.unsqueeze(0),
+                                             torch.tensor([B], device=K.device), centroid)
+    feats, sid, mass = feats[0], sid[0].clone(), mass[0]
+    frame_of = torch.arange(L * N_f, device=K.device) // N_f
+    if centroid == "medoid":
+        # Same assignment quantize_frames made (same cdist, same tie rule, same
+        # seed self-assignment), recomputed here because it is not returned.
+        a = _argmin_first(torch.cdist(K1[0].unsqueeze(0), K1[0, seeds].unsqueeze(0)).squeeze(0))
+        a[seeds] = torch.arange(B, device=K.device)
+        for j in range(L):
+            t = int(frame_of[seeds[j]])
+            if int(frame_of[sid[j]]) == t:
+                continue
+            mem = torch.nonzero((a == j) & (frame_of == t)).squeeze(1)   # contains seeds[j]
+            ctr = K1[0, a == j].mean(0, keepdim=True)
+            pick = mem[_argmin_first((K1[0, mem] - ctr).norm(dim=-1).unsqueeze(0)).squeeze(0)]
+            if bool((sid == pick).any()):
+                pick = seeds[j]          # already another group's medoid: keep the seed
+            sid[j] = pick
+            feats[j] = x1[0, pick].float()
+    t_of = frame_of[sid]
+    out_f, out_i, out_m = [], [], []
+    for t in range(L):
+        k = torch.nonzero(t_of == t).squeeze(1)
+        out_f.append(feats[k]); out_i.append(sid[k] - t * N_f); out_m.append(mass[k])
+    b = torch.tensor([len(i) for i in out_i], dtype=torch.long, device=K.device)
+    d_own = (K1[0] - K1[0, seeds][_argmin_first(
+        torch.cdist(K1[0].unsqueeze(0), K1[0, seeds].unsqueeze(0)).squeeze(0))]).norm(dim=-1)
+    radius = torch.stack([d_own[frame_of == t].max() for t in range(L)])
+    return out_f, out_i, out_m, b, float(cost[0]), radius, D, r
+
+
 def compress_video(x: torch.Tensor, B: int, W_k=None, W_v=None, g=None,
                    gamma_v: float = 1.0, alloc: str = "waterfill",
                    centroid: str = "rms", b_max: int = 0, eps: float = 1e-6,
@@ -442,8 +534,9 @@ def compress_video(x: torch.Tensor, B: int, W_k=None, W_v=None, g=None,
         x: [L, N_f, d] visual tokens after the projector.
         B: token budget, ``L <= B < L*N_f``.
         W_k, W_v, g, gamma_v, eps: the metric lift, see ``metric_lift``.
-        alloc: "waterfill" (CBA) or "even" (largest-remainder, the v0 split,
-            kept as the allocation ablation).
+        alloc: "waterfill" (CBA), "even" (largest-remainder, the v0 split,
+            kept as the allocation ablation), or "video" (``video_fps``: one
+            FPS over the whole video, one-seed floor per frame).
         centroid: "rms" or "plain", see ``quantize_frames``.
         b_max: cap on the curve length; 0 means N_f (exact).
         refine: Lloyd sweeps after the FPS seeding, 0 = off (the frozen v1
@@ -457,6 +550,12 @@ def compress_video(x: torch.Tensor, B: int, W_k=None, W_v=None, g=None,
     if not (L <= B <= L * N_f):
         raise ValueError(f"budget B={B} out of range for L={L}, N_f={N_f}")
     K, s = metric_lift(x, W_k, W_v, g, gamma_v, eps)
+    if alloc == "video":
+        if refine:
+            raise ValueError("refine is not implemented for alloc='video'")
+        feats, seed_idx, mass, b, cost, radius, D, r = _quantize_video(K, x, s, B, centroid)
+        return {"feats": feats, "seed_idx": seed_idx, "mass": mass, "b": b,
+                "cost": cost, "planned": cost, "radius": radius, "D": D, "r": r}
     bm = N_f if b_max <= 0 else int(min(b_max, N_f))
     seeds, D, r = fps_curves(K, bm)
 
