@@ -150,7 +150,7 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
                         {"labels": labels, "kept_g": g, "b_t": b_t},
                         {"method": "bv", "policy": policy, "L": L, "N_f": N_f,
                          "retention_ratio": r, "B": B, "seed": seed, **extra_meta},
-                        frame_stats(cls_attention))
+                        frame_stats(cls_attention), cfg=flashvid_config)
         return tokens, g
 
     if policy == "mq":
@@ -311,7 +311,7 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
                     {"I_raw": cls_attention, "radius": out["radius"],
                      "D": out["D"], "r_curve": out["r"]},
                     {"mass_map": b_full, "kept_g": gidx, "b_t": out["b"],
-                     "b_even": b_t},
+                     "b_even": b_t, "group_of": out["group_of"]},
                     {"method": "bv", "policy": "mq", "L": L, "N_f": N_f,
                      "retention_ratio": float(cfg.retention_ratio), "B": B,
                      "B_spent": spent,
@@ -325,7 +325,7 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
                      "cost": out["cost"], "planned": out["planned"],
                      "cost_taken": cost_wf, "cost_even": cost_even,
                      "spec": "2026-08-28_method_budgetvid2_v1"},
-                    frame_stats(cls_attention))
+                    frame_stats(cls_attention), cfg=cfg)
     return tokens, gidx
 
 
@@ -364,7 +364,7 @@ def _dump_threeway(dump_dir, cfg, policy, r, B, grid, cls_attention, I_used,
             "b_t": b_t, "B_R": rt["B_R"], "B_M": rt["B_M"],
             "N_active": rt["N_active"]}
     dump_record(dump_dir, make_tag(cfg), floats, ints, meta,
-                frame_stats(cls_attention, sc["R_sp"], sc["R_tp"]))
+                frame_stats(cls_attention, sc["R_sp"], sc["R_tp"]), cfg=cfg)
 
 
 def no_llm_pruning(hidden_states, causal_mask, attentions, cache_position,

@@ -46,6 +46,25 @@ def main():
                                    expected_total=B, masses=out["mass"])
             check(f"assembles ({tag})", tok.shape[0] == B and bool((gi[1:] > gi[:-1]).all()))
 
+    # group_of: every token points at a delivered position, and the number of
+    # tokens pointing at each delivered token is exactly its mass
+    for alloc, centroid, refine in (("waterfill", "rms", 0), ("waterfill", "medoid", 0),
+                                    ("waterfill", "rms", 3), ("even", "rms", 0),
+                                    ("video", "rms", 0), ("video", "medoid", 0)):
+        out = compress_video(x, 40, alloc=alloc, centroid=centroid, refine=refine)
+        g = torch.cat([t * N_f + out["seed_idx"][t] for t in range(L)])
+        m = torch.cat(out["mass"])
+        go = out["group_of"]
+        tag = f"{alloc}/{centroid}/refine={refine}"
+        check(f"group_of shape ({tag})", tuple(go.shape) == (L, N_f))
+        check(f"group_of points at delivered tokens ({tag})",
+              set(go.flatten().tolist()) == set(g.tolist()))
+        counts = torch.bincount(go.flatten(), minlength=L * N_f)
+        check(f"group sizes equal mass ({tag})", torch.equal(counts[g], m.long()),
+              f"{counts[g][:8].tolist()} vs {m[:8].tolist()}")
+        check(f"a delivered token belongs to its own group ({tag})",
+              torch.equal(go.flatten()[g], g))
+
     # determinism
     a = compress_video(x, 50, alloc="video", centroid="medoid")
     b2 = compress_video(x, 50, alloc="video", centroid="medoid")

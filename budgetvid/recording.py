@@ -88,16 +88,39 @@ def frame_stats(I: torch.Tensor,
     return out
 
 
+def context_meta(cfg) -> dict:
+    """What a record needs to be placed back on the video, read off the config.
+
+    ``grid_hw``: the merged token grid of one frame (set by the modeling code
+    from ``video_grid_thw``), so global index ``t * N_f + i`` is row
+    ``i // W``, column ``i % W``. ``frames``: what the eval wrapper sampled
+    (source frame count and fps, and the sampled frame indices); token frame
+    ``t`` covers sampled frames ``2t`` and ``2t + 1`` (temporal patch 2).
+    """
+    out = {}
+    h, w = int(getattr(cfg, "H", 0) or 0), int(getattr(cfg, "W", 0) or 0)
+    if h > 0 and w > 0:
+        out["grid_hw"] = [h, w]
+    frames = getattr(cfg, "dump_frames", None)
+    if frames:
+        out["frames"] = frames
+    return out
+
+
 def dump_record(dump_dir: str, tag: str,
                 float_arrays: dict[str, torch.Tensor],
                 int_arrays: dict[str, torch.Tensor],
                 meta: dict,
-                stats: dict | None) -> str | None:
+                stats: dict | None,
+                cfg=None) -> str | None:
     """Write ``<dump_dir>/<tag>.npz`` and a summary.jsonl line.
 
     Returns the path, or None when the record already exists (first dump of a
     video wins; content is deterministic so later calls carry nothing new).
+    With ``cfg``, ``context_meta(cfg)`` is merged into ``meta``.
     """
+    if cfg is not None:
+        meta = {**meta, **context_meta(cfg)}
     os.makedirs(dump_dir, exist_ok=True)
     path = os.path.join(dump_dir, f"{tag}.npz")
     if os.path.exists(path):
@@ -145,8 +168,46 @@ def wrap_flashvid_keep(dump_dir: str) -> None:
              "L": int(video_features.shape[0]), "N_f": int(video_features.shape[1]),
              "retention_ratio": float(getattr(flashvid_config, "retention_ratio", -1.0))},
             frame_stats(cls_attention),
+            cfg=flashvid_config,
         )
+        # The caller shifts g in place afterwards, so keep a copy for the
+        # inner-LLM record below.
+        flashvid_config._bv_fv_g = g.detach().clone().cpu()
         return tokens, g
 
+    orig_prune = dispatch._LLM_PRUNING_REGISTRY["flashvid"]
+
+    def recording_prune(*args, **kwargs):
+        """Record which vision-kept tokens survive FlashVID's layer-K pruning.
+
+        FlashVID cuts again inside the LLM (``pruning_layer``, keeping
+        ``llm_retention_ratio`` of the visual tokens), so ``kept_g`` alone
+        does not say what the deep layers saw. Written as a sibling
+        ``<tag>__llm.npz`` holding ``kept_llm_g``, a subset of ``kept_g`` in
+        the same global indexing.
+        """
+        cfg = kwargs.get("flashvid_config", args[6] if len(args) > 6 else None)
+        start = int(getattr(cfg, "visual_token_start_index", 0))
+        length = int(getattr(cfg, "visual_token_length", 0))
+        out = orig_prune(*args, **kwargs)
+        g = getattr(cfg, "_bv_fv_g", None)
+        if g is not None:
+            cfg._bv_fv_g = None                  # first prefill only
+            keep = out[-1].detach().cpu()
+            ranks = keep[(keep >= start) & (keep < start + length)] - start
+            meta = {"method": "flashvid", "stage": "inner_llm",
+                    "pruning_layer": int(getattr(cfg, "pruning_layer", -1)),
+                    "llm_retention_ratio": float(getattr(cfg, "llm_retention_ratio", -1.0)),
+                    "n_visual_in": length, "n_visual_kept": int(ranks.numel())}
+            if g.numel() == length:
+                dump_record(dump_dir, make_tag(cfg) + "__llm", {},
+                            {"kept_llm_g": g[ranks]}, meta, None, cfg=cfg)
+            else:                                # indexing would be wrong: say so
+                dump_record(dump_dir, make_tag(cfg) + "__llm", {}, {},
+                            {**meta, "error": f"kept_g has {g.numel()} tokens, "
+                                              f"LLM saw {length}"}, None, cfg=cfg)
+        return out
+
     dispatch.register_compression("flashvid", recording_flashvid)
+    dispatch.register_llm_pruning("flashvid", recording_prune)
     _FLASHVID_WRAPPED = True

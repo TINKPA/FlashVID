@@ -350,7 +350,7 @@ def lloyd_refine(Kt: torch.Tensor, sid: torch.Tensor, iters: int):
 
 def quantize_frames(K: torch.Tensor, x: torch.Tensor, s: torch.Tensor,
                     seeds: torch.Tensor, b: torch.Tensor, centroid: str = "rms",
-                    refine: int = 0):
+                    refine: int = 0, assign_out: list | None = None):
     """Assign every token to its nearest seed and deliver one token per group.
 
     Args:
@@ -362,6 +362,9 @@ def quantize_frames(K: torch.Tensor, x: torch.Tensor, s: torch.Tensor,
         centroid: "rms" for the metric-space centroid direction at the group's
             mean norm (L1', the default), or "plain" for the unweighted mean in
             the original space (the ablation, and what every prior merge does).
+        assign_out: if a list is given, each frame's assignment [N_f] (the
+            index into that frame's delivered tokens that every token joined)
+            is appended to it -- recorded for analysis, never used downstream.
 
     Returns:
         ``(feats, seed_idx, mass, cost)`` -- lists of length L holding, per
@@ -427,6 +430,8 @@ def quantize_frames(K: torch.Tensor, x: torch.Tensor, s: torch.Tensor,
             feats.append(num / m.clamp(min=1).unsqueeze(-1).float())
         seed_idx.append(sid)
         mass.append(m)
+        if assign_out is not None:
+            assign_out.append(a)
         dd = torch.cdist(K[t].unsqueeze(0), K[t, sid].unsqueeze(0)).squeeze(0)
         cost.append(float(dd.gather(1, a.unsqueeze(1)).sum()))
     return feats, seed_idx, mass, cost
@@ -492,8 +497,10 @@ def _quantize_video(K, x, s, B, centroid):
     L, N_f, C = K.shape
     seeds, D, r = video_fps(K, B)
     K1, x1, s1 = K.reshape(1, L * N_f, C), x.reshape(1, L * N_f, -1), s.reshape(1, L * N_f, 1)
+    assign = []
     feats, sid, mass, cost = quantize_frames(K1, x1, s1, seeds.unsqueeze(0),
-                                             torch.tensor([B], device=K.device), centroid)
+                                             torch.tensor([B], device=K.device), centroid,
+                                             assign_out=assign)
     feats, sid, mass = feats[0], sid[0].clone(), mass[0]
     frame_of = torch.arange(L * N_f, device=K.device) // N_f
     if centroid == "medoid":
@@ -521,7 +528,9 @@ def _quantize_video(K, x, s, B, centroid):
     d_own = (K1[0] - K1[0, seeds][_argmin_first(
         torch.cdist(K1[0].unsqueeze(0), K1[0, seeds].unsqueeze(0)).squeeze(0))]).norm(dim=-1)
     radius = torch.stack([d_own[frame_of == t].max() for t in range(L)])
-    return out_f, out_i, out_m, b, float(cost[0]), radius, D, r
+    # every token -> global index of the token its group was delivered as
+    group_of = sid[assign[0]].reshape(L, N_f)
+    return out_f, out_i, out_m, b, float(cost[0]), radius, D, r, group_of
 
 
 def compress_video(x: torch.Tensor, B: int, W_k=None, W_v=None, g=None,
@@ -544,6 +553,8 @@ def compress_video(x: torch.Tensor, B: int, W_k=None, W_v=None, g=None,
 
     Returns:
         dict with ``feats``/``seed_idx``/``mass`` (per frame), ``b`` [L],
+        ``group_of`` [L, N_f] (for every token, the global index of the token
+        its group was delivered as),
         ``cost`` (realized), ``planned`` (envelope), ``radius`` [L].
     """
     L, N_f, _ = x.shape
@@ -553,9 +564,10 @@ def compress_video(x: torch.Tensor, B: int, W_k=None, W_v=None, g=None,
     if alloc == "video":
         if refine:
             raise ValueError("refine is not implemented for alloc='video'")
-        feats, seed_idx, mass, b, cost, radius, D, r = _quantize_video(K, x, s, B, centroid)
+        feats, seed_idx, mass, b, cost, radius, D, r, group_of = _quantize_video(K, x, s, B, centroid)
         return {"feats": feats, "seed_idx": seed_idx, "mass": mass, "b": b,
-                "cost": cost, "planned": cost, "radius": radius, "D": D, "r": r}
+                "cost": cost, "planned": cost, "radius": radius, "D": D, "r": r,
+                "group_of": group_of}
     bm = N_f if b_max <= 0 else int(min(b_max, N_f))
     seeds, D, r = fps_curves(K, bm)
 
@@ -572,8 +584,13 @@ def compress_video(x: torch.Tensor, B: int, W_k=None, W_v=None, g=None,
     else:
         raise KeyError(f"unknown allocation '{alloc}'; known: waterfill, even")
 
-    feats, seed_idx, mass, cost = quantize_frames(K, x, s, seeds, b, centroid, refine)
+    assign = []
+    feats, seed_idx, mass, cost = quantize_frames(K, x, s, seeds, b, centroid, refine,
+                                                  assign_out=assign)
+    # every token -> global index (t * N_f + i) of the token its group was delivered as
+    group_of = torch.stack([t * N_f + seed_idx[t][assign[t]] for t in range(L)])
     return {"feats": feats, "seed_idx": seed_idx, "mass": mass, "b": b,
+            "group_of": group_of,
             "cost": float(sum(cost)), "planned": planned,
             "radius": torch.stack([r[t, int(b[t]) - 1] for t in range(L)]),
             "D": D, "r": r}

@@ -2,6 +2,7 @@ import os
 import time
 from typing import List
 
+import torch
 from loguru import logger as eval_logger
 from tqdm import tqdm
 
@@ -71,6 +72,7 @@ class Qwen2_5_VL(Qwen2_5_VLSimple):
             # was found in Round 1: `--model qwen2_5_vl` resolves HERE, and the
             # tag-setting code lives in the simple parent's generate_until,
             # which this method overrides. Only unambiguous at batch_size=1.
+            _cfg = None
             if len(videos) == 1 and isinstance(videos[0], str):
                 _cfg = getattr(self, "_bv_cfg", None)
                 if _cfg is None and hasattr(self._model, "modules"):
@@ -86,6 +88,7 @@ class Qwen2_5_VL(Qwen2_5_VLSimple):
                           f"video={os.path.basename(videos[0])}", flush=True)
                 if _cfg is not None:
                     _cfg.dump_tag = os.path.splitext(os.path.basename(videos[0]))[0]
+                    _cfg.dump_frames = None   # never carry the previous video's frames
 
             # Apply chat template
             video_kwargs = {
@@ -109,6 +112,19 @@ class Qwen2_5_VL(Qwen2_5_VLSimple):
                         nframes = (nframes // 2) * 2  # Floor to nearest even number
                         nframes = max(2, nframes)  # At least 2 frames
                         video_kwargs["nframes"] = nframes
+                        # Which source frames the model saw, for the compression
+                        # dump (budgetvid/recording.py:context_meta). The rule is
+                        # qwen_vl_utils' own for a given nframes; checked against
+                        # the installed version in the dump smoke test.
+                        if _cfg is not None:
+                            _cfg.dump_frames = {
+                                "source_frames": int(video_total_frames),
+                                "source_fps": float(vr.get_avg_fps()),
+                                "nframes": int(nframes),
+                                "indices": torch.linspace(0, video_total_frames - 1, nframes)
+                                                .round().long().tolist(),
+                                "index_rule": "qwen_vl_utils: linspace(0, total-1, nframes).round()",
+                            }
                     except Exception as e:
                         eval_logger.warning(f"Failed to probe video {videos[0]}: {e}, using default nframes")
                         video_kwargs["nframes"] = self.max_num_frames
