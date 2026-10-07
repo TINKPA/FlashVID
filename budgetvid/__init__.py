@@ -5,19 +5,14 @@ BudgetVID reuses FlashVID's scaffolding wholesale. The monkeypatched
 FlashVID's code, imported not copied, so an upstream rebase carries straight
 over and ``flashvid()`` stays available untouched as a baseline.
 
-What BudgetVID changes is one thing: FlashVID spends the same per-frame token
-budget on every segment of a video, so a static shot and a busy one are
-compressed equally hard. BudgetVID routes that decision through an allocation
-policy instead.
-
-Usage mirrors ``flashvid()``::
+What this package adds is one vision-side policy, MassVID (``policy="mq"``,
+measure quantization with the log-mass attention bias), plus FlashVID's own
+compression instrumented with that bias (``policy="flashvid_mass"``). Usage
+mirrors ``flashvid()``::
 
     from budgetvid import budgetvid
 
-    model = budgetvid(model, allocation="uniform", retention_ratio=0.25)
-
-``allocation="uniform"`` reproduces FlashVID exactly and exists as the
-regression check. Write new policies in ``budgetvid/allocation.py``.
+    model = budgetvid(model, policy="mq", retention_ratio=0.125)
 
 Everything above needs FlashVID, which needs transformers and a CUDA-ish
 environment. ``budgetvid.core`` deliberately needs neither, so that the scoring
@@ -35,37 +30,27 @@ from dataclasses import asdict
 __all__ = [
     "budgetvid",
     "BudgetVidConfig",
-    "register_allocation",
-    "available_allocations",
 ]
 
-_HEAVY = {"BudgetVidConfig", "register_allocation", "available_allocations"}
+_HEAVY = {"BudgetVidConfig"}
 
 
 def _load_heavy():
     """Import the FlashVID-dependent half and perform dispatch registration."""
     global nn, _apply_flashvid, register_compression, register_llm_pruning
     global register_score_bias, apply_mass_bias
-    global fastv_prune, available_allocations, register_allocation
-    global budgetvid_compression, BudgetVidConfig, _loaded
+    global BudgetVidConfig, _loaded
 
     from torch import nn  # noqa: F811
 
     from flashvid import flashvid as _apply_flashvid  # noqa: F811
     from flashvid.dispatch import (  # noqa: F811
         register_compression, register_llm_pruning, register_score_bias)
-    from flashvid.utils import fastv_prune  # noqa: F811
-
-    from .allocation import available_allocations, register_allocation  # noqa: F811
     from .mass_bias import apply_mass_bias  # noqa: F811
-    from .compression import budgetvid_compression  # noqa: F811
     from .configuration_budgetvid import BudgetVidConfig  # noqa: F811
     from .adapters.pipeline import budgetvid_pipeline, no_llm_pruning  # noqa: F811
 
-    register_compression("budgetvid", budgetvid_compression)
-    # The method this project's own experiments run under. Separate from the
-    # allocation-based "budgetvid" entry so the two cannot be confused in a
-    # results table.
+    # The method this project's own experiments run under (MassVID = policy "mq").
     register_compression("bv", budgetvid_pipeline)
     # `bv` has a single budget by construction, so the inner-LLM stage is a
     # no-op. Without this the dispatch raises KeyError at `pruning_layer`.
@@ -73,12 +58,6 @@ def _load_heavy():
     # The mass channel of BudgetVID 2.0 (spec eq 5). A no-op for every policy
     # that leaves `token_mass` unset, so the other rows are untouched.
     register_score_bias("bv", apply_mass_bias)
-    # The inner-LLM stage is FlashVID's for now. Note that it is a *second*,
-    # independent budget: the vision side keeps `retention_ratio * expansion` of
-    # the tokens, then layer `pruning_layer` cuts to `llm_retention_ratio` of
-    # what is left. Making the two budgets one allocation is an open thread, and
-    # the place to do it is here.
-    register_llm_pruning("budgetvid", fastv_prune)
     # FlashVID itself with the mass channel added (budgetvid/flashvid_mass.py):
     # the plug-in test of whether log m helps a published merge-based method.
     from .flashvid_mass import (
@@ -195,12 +174,7 @@ def _text_stack_to_sdpa(model) -> int:
     return 0
 
 
-def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: bool = True,
-              policy: str | None = None, seed: int = 42,
-              eta: float = 0.5, lam: float = 1.0,
-              alpha_min: float = 0.4, alpha_max: float = 0.8,
-              active_frac: float = 0.6, alpha_flip: bool = False,
-              force_alpha: float = -1.0, debias_pos: bool = False,
+def budgetvid(model: nn.Module, policy: str | None = None,
               lift: str = "kv", gamma_v: float = 1.0, lift_norm: bool = True,
               mq_alloc: str = "waterfill", centroid: str = "rms",
               b_max: int = 0, mass: bool = True, text_sdpa: bool = False,
@@ -212,16 +186,10 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
     Args:
         model (nn.Module): The model to patch. Same models ``flashvid()``
             supports: LLaVA-OneVision, LLaVA-Video, Qwen2.5-VL, Qwen3-VL.
-        allocation (str, optional): Name of the budget allocation policy, see
-            ``budgetvid/allocation.py``. Defaults to "uniform", which
-            reproduces FlashVID.
-        enforce_budget (bool, optional): Raise if a policy spends more than the
-            global budget. Defaults to True.
-        policy (str, optional): When given, route vision-side compression to
-            ``budgetvid/adapters/pipeline.py`` (method ``bv``) and run this
-            policy -- "none", "random_drop", "uniform". Leaving it None keeps
-            the allocation-based path.
-        seed (int, optional): Seed for policies with a random component.
+        policy (str, optional): Vision-side policy, ``budgetvid/adapters/pipeline.py``
+            (method ``bv``): "mq" is MassVID, "none" passes every token through.
+            "flashvid_mass" runs FlashVID's own compression with the mass
+            channel (method ``fvmass``). None behaves like "none".
         lift (str, optional): Metric space for policy ``mq`` -- "kv", "key" or
             "none". See BudgetVidConfig for what each means.
         gamma_v (float, optional): Weight of the value half of the lift.
@@ -265,13 +233,8 @@ def budgetvid(model: nn.Module, allocation: str = "uniform", enforce_budget: boo
     # flows through without being listed again here.
     config = BudgetVidConfig(
         **asdict(model.flashvid_config),
-        allocation=allocation,
-        enforce_budget=enforce_budget,
         policy=policy or "none",
-        seed=seed,
-        eta=eta, lam=lam, alpha_min=alpha_min, alpha_max=alpha_max,
-        active_frac=active_frac, alpha_flip=alpha_flip, force_alpha=force_alpha,
-        debias_pos=debias_pos, dump_dir=dump_dir,
+        dump_dir=dump_dir,
         lift=lift, gamma_v=gamma_v, lift_norm=lift_norm, mq_alloc=mq_alloc,
         centroid=centroid, b_max=b_max, mass=mass, refine=refine,
     )

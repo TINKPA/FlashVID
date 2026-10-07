@@ -1,90 +1,32 @@
-"""Registry entry point: one policy switch, one assembly path.
+"""Registry entry point for method ``bv``: one policy switch, one assembly path.
 
-Registered under the method name ``bv``. Which policy runs is
-``config.policy``; everything after the policy is shared, which is what makes an
-ablation row comparable to a baseline row rather than a different program that
-happens to produce a similar number.
+Which policy runs is ``config.policy``: ``"none"`` passes every token through
+(the vanilla row), ``"mq"`` is MassVID (measure quantization, spec
+notes/2026-08-28_method_budgetvid2_v1.html). Everything after the policy is
+shared, which is what makes an ablation row comparable to a baseline row rather
+than a different program that happens to produce a similar number.
 
-Budget is an ABSOLUTE token count, per the spec: B = round(r * N) with N = L*N_f,
-split across frames by largest remainder. Note this differs from FlashVID's own
-`retention_ratio`, which is a per-LLM-layer average and lands ~30% higher in
-actual visual tokens (see experiments/flashvid_token_accounting). Do not read the
-two as the same knob.
+Budget is an ABSOLUTE token count, per the spec: B = round(r * N) with N = L*N_f.
+Note this differs from FlashVID's own `retention_ratio`, which is a per-LLM-layer
+average and lands ~30% higher in actual visual tokens at the LLM input
+(experiments/flashvid_token_accounting). Do not read the two as the same knob.
+
+The Round-1 policies (score -> route -> merge; uniform / random_drop / attn_top
+baselines) were removed on 2026-10-07; every run that used them records its
+commit, and 89c59fe is the last one that carries them.
 """
 
 from __future__ import annotations
-
-import hashlib
-import pathlib
 
 import torch
 
 from ..core.assembly import assemble
 from ..core.budget import split_budget
-from ..core.merging import seeded_merge
-from ..core.policies import attn_top_keep, random_drop_keep, uniform_keep
 from ..core.quantize import compress_video, curve_cost
-from ..core.routing import route_tokens
-from ..core.scoring import score_tokens
 from ..mass_bias import clear_mass
 from ..recording import dump_record, frame_stats, make_tag
 
-POLICIES = ("none", "random_drop", "uniform", "threeway", "prune_only", "merge_only",
-            "attn_top", "attn_top_nosink", "mq")
-
-_ASSETS = pathlib.Path(__file__).resolve().parents[1] / "assets"
-
-
-def _rank01(v: torch.Tensor) -> torch.Tensor:
-    """Within-frame rank percentile, matching core.scoring.rank_normalize."""
-    n = v.shape[-1]
-    o = v.argsort(dim=-1, stable=True)
-    r = torch.empty_like(o)
-    r.scatter_(-1, o, torch.arange(n, device=v.device).expand_as(o))
-    return r.float() / max(n - 1, 1)
-
-
-def _derived_seed(base_seed: int, tag: str) -> int:
-    """Per-video seed for random policies (Round-2 preprocessing step 3).
-
-    Round 1 seeded every video with the same global 42, so random_drop used ONE
-    mask for the whole benchmark -- coverage variance across videos was zero and
-    per-video analysis on the random arm was structurally impossible. Deriving
-    from (base_seed, video tag) keeps runs reproducible while making the masks
-    independent across videos.
-    """
-    return int(hashlib.sha256(f"{base_seed}:{tag}".encode()).hexdigest()[:8], 16)
-
-
-def _grid_from_config(cfg, N_f: int):
-    """(H, W) if the modeling code declared the native grid and it matches N_f."""
-    h = int(getattr(cfg, "H", 0) or 0)
-    w = int(getattr(cfg, "W", 0) or 0)
-    if h > 0 and w > 0 and h * w == N_f:
-        return h, w
-    return None
-
-
-def _sink_cells(cfg, N_f: int) -> tuple[torch.Tensor, str]:
-    """Load the offline sink-cell set for the video's native grid.
-
-    Built by experiments/budgetvid/scripts/build_qwen3_pos_baseline.py from the
-    Round-1 dumps (mean within-frame rank >= 0.85, corner + border population;
-    provenance in assets/pos_baseline_qwen3_meta.json). attn_top_nosink cannot
-    run without it -- that is by design, not a fallback situation.
-    """
-    grid = _grid_from_config(cfg, N_f)
-    if grid is None:
-        raise RuntimeError(
-            "attn_top_nosink needs the native grid (config.H/W); it is only "
-            "wired for backbones that declare it (Qwen3-VL)")
-    p = _ASSETS / f"sink_cells_qwen3_{grid[0]}x{grid[1]}.npy"
-    if not p.exists():
-        raise FileNotFoundError(
-            f"positional baseline not built for grid {grid[0]}x{grid[1]}: {p} "
-            "(run build_qwen3_pos_baseline.py first)")
-    import numpy as np
-    return torch.from_numpy(np.load(p)).long(), p.name
+POLICIES = ("none", "mq")
 
 
 def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor,
@@ -117,123 +59,8 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
     r = float(flashvid_config.retention_ratio)
     B = int(round(r * L * N_f))
     b_t = split_budget(B, L, N_f).to(device)
-
-    seed = int(getattr(flashvid_config, "seed", 42))
-    if policy in ("uniform", "random_drop", "attn_top", "attn_top_nosink"):
-        extra_meta = {}
-        if policy == "uniform":
-            keep = uniform_keep(L, N_f, b_t, device=device)
-        elif policy == "random_drop":
-            tag = str(getattr(flashvid_config, "dump_tag", "") or "")
-            if tag:
-                extra_meta = {"seed_base": seed, "seed_tag": tag}
-                seed = _derived_seed(seed, tag)
-            keep = random_drop_keep(L, N_f, b_t, seed=seed, device=device)
-        else:
-            sink = None
-            if policy == "attn_top_nosink":
-                sink, asset = _sink_cells(flashvid_config, N_f)
-                extra_meta = {"n_sink_cells": int(sink.numel()), "sink_asset": asset}
-            keep = [k.to(device) for k in attn_top_keep(cls_attention, b_t,
-                                                        sink_cells=sink)]
-        for t, k in enumerate(keep):
-            assert k.numel() == int(b_t[t]), (t, k.numel(), int(b_t[t]))
-        tokens, g = assemble(video_features, keep, merged=None, expected_total=B)
-        flashvid_config.visual_token_length = int(tokens.shape[0])
-        dump_dir = str(getattr(flashvid_config, "dump_dir", "") or "")
-        if dump_dir:
-            labels = torch.zeros(L, N_f, dtype=torch.int8)
-            for t, k in enumerate(keep):
-                labels[t, k.cpu().long()] = 2
-            dump_record(dump_dir, make_tag(flashvid_config),
-                        {"I_raw": cls_attention},
-                        {"labels": labels, "kept_g": g, "b_t": b_t},
-                        {"method": "bv", "policy": policy, "L": L, "N_f": N_f,
-                         "retention_ratio": r, "B": B, "seed": seed, **extra_meta},
-                        frame_stats(cls_attention), cfg=flashvid_config)
-        return tokens, g
-
-    if policy == "mq":
-        return _measure_quantization(video_features, cls_attention, flashvid_config,
-                                     b_t, B, L, N_f)
-
-    # ---- v0: score -> route -> merge -> assemble ----
-    cfg = flashvid_config
-    # Grid shape: Qwen3-VL's native-resolution grid is not square; its modeling
-    # code stores (H, W) on the config before compress() (spec v1.3 §2.1). The
-    # LLaVA path has no such fields and stays on the square-root route.
-    cfg_h = int(getattr(cfg, "H", 0) or 0)
-    cfg_w = int(getattr(cfg, "W", 0) or 0)
-    if cfg_h > 0 and cfg_w > 0 and cfg_h * cfg_w == N_f:
-        grid = (cfg_h, cfg_w)
-    else:
-        s = int(round(N_f ** 0.5))
-        if s * s != N_f:
-            raise ValueError(
-                f"N_f={N_f} is not square and config H*W ({cfg_h}x{cfg_w}) does not "
-                "match it; the 4-neighbourhood needs the true grid shape")
-        grid = (s, s)
-
-    I_used = cls_attention.float()
-    if bool(getattr(cfg, "debias_pos", False)):
-        # The importance signal is ~27% positional (Step 2): eight of the 196
-        # cells sit in the frame's top-b_t 98.5% of the time. At b_t=2 that means
-        # both retained tokens are the same two grid cells in every frame, so a
-        # 256-frame video contributes 256 copies of one position instead of
-        # coverage. Subtracting the position mean removes exactly that component
-        # and leaves the content-dependent part.
-        import numpy as _np
-        # Native-grid backbones (Qwen3-VL) get a per-grid baseline built offline
-        # from the Round-1 dumps; the LLaVA square grid keeps its original file.
-        _pq = _ASSETS / f"pos_baseline_qwen3_{grid[0]}x{grid[1]}.npy"
-        if _grid_from_config(cfg, N_f) is not None and _pq.exists():
-            _b = _np.load(_pq).reshape(-1)
-        else:
-            _b = _np.load(_ASSETS / f"pos_baseline_pooled{N_f}.npy")
-        base = torch.from_numpy(_b).to(I_used.device, I_used.dtype)
-        I_used = _rank01(I_used) - base.unsqueeze(0)
-
-    sc = score_tokens(video_features.float(), I_used, grid,
-                      eta=float(getattr(cfg, "eta", 0.5)),
-                      lam=float(getattr(cfg, "lam", 1.0)))
-
-    # Ablation rows B and A of spec §2.4, expressed as routing degeneracies rather
-    # than as separate code paths, so they share this exact pipeline.
-    fa = float(getattr(cfg, "force_alpha", -1.0))
-    force_alpha = fa if fa >= 0 else None     # dataclasses cannot hold None here
-    active_frac = float(getattr(cfg, "active_frac", 0.6))
-    if policy == "prune_only":          # M_t = empty -> pure pruning
-        force_alpha = 1.0
-    elif policy == "merge_only":        # D_t = empty -> pure merging
-        active_frac = 1.0
-
-    rt = route_tokens(
-        sc["S"], sc["R_raw_mean"], b_t,
-        alpha_min=float(getattr(cfg, "alpha_min", 0.4)),
-        alpha_max=float(getattr(cfg, "alpha_max", 0.8)),
-        beta=None if active_frac is not None else float(getattr(cfg, "beta", 4.0)),
-        active_frac=active_frac,
-        force_alpha=force_alpha,
-        alpha_flip=bool(getattr(cfg, "alpha_flip", False)),
-    )
-
-    merged, absorb = [], []
-    for t in range(L):
-        m, s, pool_tok, pool_seed = seeded_merge(video_features[t], rt["pool_idx"][t],
-                                                 sc["S"][t], int(rt["B_M"][t]),
-                                                 return_assign=True)
-        merged.append((m, s))
-        absorb.append((pool_tok, pool_seed))
-
-    tokens, g = assemble(video_features, rt["retain_idx"], merged=merged,
-                         expected_total=B)
-    flashvid_config.visual_token_length = int(tokens.shape[0])
-
-    dump_dir = str(getattr(cfg, "dump_dir", "") or "")
-    if dump_dir:
-        _dump_threeway(dump_dir, cfg, policy, r, B, grid, cls_attention, I_used,
-                       sc, rt, absorb, b_t, g, L, N_f)
-    return tokens, g
+    return _measure_quantization(video_features, cls_attention, flashvid_config,
+                                 b_t, B, L, N_f)
 
 
 def _lift_params(cfg, device, dtype):
@@ -327,44 +154,6 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
                      "spec": "2026-08-28_method_budgetvid2_v1"},
                     frame_stats(cls_attention), cfg=cfg)
     return tokens, gidx
-
-
-def _dump_threeway(dump_dir, cfg, policy, r, B, grid, cls_attention, I_used,
-                   sc, rt, absorb, b_t, g, L, N_f):
-    """Round-1 recording: routing labels, absorption map, and every scoring
-    intermediate, per video. See budgetvid/recording.py for the file layout."""
-    labels = torch.zeros(L, N_f, dtype=torch.int8)
-    seed_of = torch.full((L, N_f), -1, dtype=torch.int32)
-    for t in range(L):
-        labels[t, rt["retain_idx"][t].cpu().long()] = 2
-        p = rt["pool_idx"][t]
-        if p.numel():
-            labels[t, p.cpu().long()] = 1
-        pool_tok, pool_seed = absorb[t]
-        if pool_tok.numel():
-            seed_of[t, pool_tok.cpu().long()] = pool_seed.cpu().to(torch.int32)
-    meta = {
-        "method": "bv", "policy": policy, "L": L, "N_f": N_f, "grid": list(grid),
-        "retention_ratio": r, "B": B,
-        "lam": float(getattr(cfg, "lam", 1.0)),
-        "eta": float(getattr(cfg, "eta", 0.5)),
-        "alpha_min": float(getattr(cfg, "alpha_min", 0.4)),
-        "alpha_max": float(getattr(cfg, "alpha_max", 0.8)),
-        "active_frac": float(getattr(cfg, "active_frac", 0.6)),
-        "alpha_flip": bool(getattr(cfg, "alpha_flip", False)),
-        "debias_pos": bool(getattr(cfg, "debias_pos", False)),
-        "force_alpha": float(getattr(cfg, "force_alpha", -1.0)),
-        "seed": int(getattr(cfg, "seed", 42)),
-    }
-    floats = {"I_raw": cls_attention, "I_used": I_used,
-              "R_sp": sc["R_sp"], "R_tp": sc["R_tp"], "R_raw": sc["R_raw"],
-              "I_hat": sc["I_hat"], "R_hat": sc["R_hat"], "S": sc["S"],
-              "alpha": rt["alpha"]}
-    ints = {"labels": labels, "seed_of": seed_of, "kept_g": g,
-            "b_t": b_t, "B_R": rt["B_R"], "B_M": rt["B_M"],
-            "N_active": rt["N_active"]}
-    dump_record(dump_dir, make_tag(cfg), floats, ints, meta,
-                frame_stats(cls_attention, sc["R_sp"], sc["R_tp"]), cfg=cfg)
 
 
 def no_llm_pruning(hidden_states, causal_mask, attentions, cache_position,

@@ -101,20 +101,9 @@ class Llava_OneVision(lmms):
         llm_retention_ratio: float = 0.3,
         # ! BudgetVID parameters. Every FlashVid parameter above applies too.
         enable_budgetvid: bool = False,
-        allocation: str = "uniform",
-        enforce_budget: bool = True,
         # `policy` routes to budgetvid/adapters/pipeline.py; every policy shares
         # one assembly path so ablation rows stay comparable to baseline rows.
         policy: str = None,
-        bv_seed: int = 42,
-        eta: float = 0.5,
-        lam: float = 1.0,
-        alpha_min: float = 0.4,
-        alpha_max: float = 0.8,
-        active_frac: float = 0.6,
-        alpha_flip: bool = False,
-        force_alpha: float = -1.0,
-        debias_pos: bool = False,
         # ! BudgetVID 2.0 (measure quantization), spec 2026-08-28_method_budgetvid2_v1.
         # Every one of these is an ablation switch except `lift`/`gamma_v`, which
         # pick the metric space the grouping decisions are taken in.
@@ -204,13 +193,7 @@ class Llava_OneVision(lmms):
 
             self._model = budgetvid(
                 model=self._model,
-                allocation=allocation,
-                enforce_budget=enforce_budget,
                 policy=policy,
-                seed=bv_seed,
-                eta=eta, lam=lam, alpha_min=alpha_min, alpha_max=alpha_max,
-                active_frac=active_frac, alpha_flip=alpha_flip, force_alpha=force_alpha,
-                debias_pos=debias_pos,
                 lift=lift, gamma_v=gamma_v, lift_norm=lift_norm,
                 mq_alloc=mq_alloc, centroid=centroid, b_max=b_max, mass=mass,
                 text_sdpa=text_sdpa, refine=refine,

@@ -124,8 +124,6 @@ class LlavaVid(lmms):
         llm_retention_ratio: float = 0.3,
         # ! BudgetVID parameters. Every FlashVid parameter above applies too.
         enable_budgetvid: bool = False,
-        allocation: str = "uniform",
-        enforce_budget: bool = True,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -227,8 +225,6 @@ class LlavaVid(lmms):
 
             self._model = budgetvid(
                 model=self._model,
-                allocation=allocation,
-                enforce_budget=enforce_budget,
                 retention_ratio=retention_ratio,
                 expansion=expansion,
                 do_segment=do_segment,
