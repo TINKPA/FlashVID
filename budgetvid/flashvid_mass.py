@@ -44,9 +44,10 @@ import math
 import torch
 from torch.nn import functional as F
 
-from flashvid.utils import ALL_TOKEN_SELECTION_METHOD, dpc_knn, fastv_prune, segment
+from flashvid.utils import ALL_TOKEN_SELECTION_METHOD, dpc_knn, segment
 
-from .mass_bias import apply_mass_bias, clear_mass
+from .llm_prune import fastv_prune_keep_mass, mass_score_bias, reset_inner_state
+from .mass_bias import clear_mass
 
 
 def flashvid_compression_with_mass(video_features, cls_attention, flashvid_config):
@@ -57,7 +58,7 @@ def flashvid_compression_with_mass(video_features, cls_attention, flashvid_confi
     leaves it None otherwise.
     """
     clear_mass(flashvid_config)
-    flashvid_config.fvmass_pruned = False
+    reset_inner_state(flashvid_config)
     num_frames, num_visual_tokens, feat_dim = video_features.shape
 
     if flashvid_config.do_segment:
@@ -286,52 +287,11 @@ def _spatiotemporal_compression_with_mass(video_features, temporal_threshold, to
 
 def fvmass_prune(hidden_states, causal_mask, attentions, cache_position, position_ids,
                  position_embeddings, flashvid_config, visual_pos_masks=None):
-    """FlashVID's ``fastv_prune``, with the mass vector and the bias kept on the kept keys."""
-    flashvid_config.fvmass_pruned = True
-    start = int(flashvid_config.visual_token_start_index)
-    n_before = int(flashvid_config.visual_token_length)
-    out = fastv_prune(
-        hidden_states=hidden_states,
-        causal_mask=causal_mask,
-        attentions=attentions,
-        cache_position=cache_position,
-        position_ids=position_ids,
-        position_embeddings=position_embeddings,
-        flashvid_config=flashvid_config,
-        visual_pos_masks=visual_pos_masks,
-    )
-    m = getattr(flashvid_config, "token_mass", None)
-    if m is None:
-        return out
-    hidden_states, causal_mask, position_ids, cache_position, position_embeddings, keep_indices = out
-
-    in_span = (keep_indices >= start) & (keep_indices < start + n_before)
-    m_kept = m.to(keep_indices.device)[keep_indices[in_span] - start]
-    if m_kept.numel() != int(flashvid_config.visual_token_length):
-        raise AssertionError(
-            f"fvmass prune: kept {m_kept.numel()} masses for {flashvid_config.visual_token_length} visual tokens")
-    flashvid_config.token_mass = m_kept
-
-    if causal_mask is None or causal_mask.dtype == torch.bool:
-        raise AssertionError("fvmass prune: expected the additive float mask the prefill bias built")
-    floor = torch.finfo(causal_mask.dtype).min
-    rebuilt = torch.zeros_like(causal_mask)
-    rebuilt.masked_fill_(causal_mask <= floor / 2, floor)
-    beta = m_kept.to(torch.float32).clamp(min=1.0).log().to(causal_mask.dtype)
-    rebuilt[..., start:start + m_kept.numel()] += beta
-    return hidden_states, rebuilt, position_ids, cache_position, position_embeddings, keep_indices
+    """FlashVID's ``fastv_prune``, with the mass vector and the bias kept on the kept keys
+    (``budgetvid/llm_prune.py``, shared with method ``bv``'s ``llm_prune=fastv``)."""
+    return fastv_prune_keep_mass(hidden_states, causal_mask, attentions, cache_position,
+                                 position_ids, position_embeddings, flashvid_config,
+                                 visual_pos_masks=visual_pos_masks)
 
 
-def fvmass_score_bias(causal_mask, hidden_states, cache_position, flashvid_config, past_key_values=None):
-    """``apply_mass_bias`` in prefill, and in decode unless inner pruning ran (see module docstring)."""
-    if hidden_states.shape[1] > 1:
-        return apply_mass_bias(causal_mask, hidden_states, cache_position, flashvid_config, past_key_values)
-    pruned = getattr(flashvid_config, "fvmass_pruned", False)
-    if not getattr(flashvid_config, "_fvmass_decode_logged", False):
-        # Once per process: which of the two decode paths this run is on.
-        flashvid_config._fvmass_decode_logged = True
-        on = not pruned and getattr(flashvid_config, "token_mass", None) is not None
-        print(f"[BV] fvmass decode: inner pruning ran {pruned}, log-mass bias {'on' if on else 'off'}", flush=True)
-    if pruned:
-        return causal_mask
-    return apply_mass_bias(causal_mask, hidden_states, cache_position, flashvid_config, past_key_values)
+fvmass_score_bias = mass_score_bias

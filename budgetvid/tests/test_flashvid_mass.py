@@ -72,10 +72,10 @@ def video(seed, F=16, N=64, D=24, drift=0.15, scene_every=5):
 def compare(tag, feats, cls, cfg_kw):
     ref_cfg, mass_cfg = published_qwen25(**cfg_kw), published_qwen25(**cfg_kw)
     mass_cfg.mass = True
-    mass_cfg.fvmass_pruned = True   # left over from the previous video's prefill
+    mass_cfg.inner_pruned = True   # left over from the previous video's prefill
     ref_tok, ref_idx = flashvid_compression(feats.clone(), cls.clone(), ref_cfg)
     tok, idx = flashvid_compression_with_mass(feats.clone(), cls.clone(), mass_cfg)
-    check(f"{tag}: compression clears the previous video's pruning record", mass_cfg.fvmass_pruned is False)
+    check(f"{tag}: compression clears the previous video's pruning record", mass_cfg.inner_pruned is False)
     check(f"{tag}: same number of tokens", tok.shape == ref_tok.shape, f"{tuple(tok.shape)} vs {tuple(ref_tok.shape)}")
     if tok.shape == ref_tok.shape:
         check(f"{tag}: tokens bit-identical", torch.equal(tok, ref_tok),
@@ -140,7 +140,7 @@ def main():
         hidden_states=hidden, causal_mask=mask, attentions=attn, cache_position=torch.arange(L),
         position_ids=torch.arange(L).unsqueeze(0), position_embeddings=pos_emb, flashvid_config=cfg)
     k = math.ceil(n_vis * 0.5)
-    check("prune: records that inner pruning ran", getattr(cfg, "fvmass_pruned", None) is True)
+    check("prune: records that inner pruning ran", getattr(cfg, "inner_pruned", None) is True)
     check("prune: kept masses are those of visual positions 1, 3, 4",
           cfg.token_mass.tolist() == [2, 4, 5], str(cfg.token_mass.tolist()))
     new_len = n_before + k + n_after
@@ -170,7 +170,7 @@ def main():
         c.visual_token_start_index = n_before
         c.visual_token_length = n_vis
         c.token_mass = mass
-        c.fvmass_pruned = False   # what flashvid_compression_with_mass leaves before prefill
+        c.inner_pruned = False   # what flashvid_compression_with_mass leaves before prefill
         return c
     cfg_np = no_prune_cfg(torch.tensor([1, 2, 3, 4, 5, 6]))
     cache = types.SimpleNamespace(get_seq_length=lambda layer_idx=0: L)

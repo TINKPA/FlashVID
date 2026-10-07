@@ -50,6 +50,11 @@ class BudgetVidConfig(FlashVidConfig):
     # conventional mass-destroying merge. Requires an attention implementation
     # that accepts an additive mask -- sdpa or eager, never flash_attention_2.
     mass: bool = field(default=True)
+    # Inner-LLM stage for method bv: "none" (one budget, every layer sees B
+    # tokens) or "fastv" (FlashVID's second stage, unchanged: at `pruning_layer`
+    # keep `llm_retention_ratio` of the visual tokens by last-query attention).
+    # See budgetvid/llm_prune.py.
+    llm_prune: str = field(default="none")
     # Set by budgetvid() when the decoder is moved to sdpa for the mass bias.
     # Recorded rather than assumed, so a run's metadata says which backend the
     # LANGUAGE model actually used (the vision tower stays on FA2 either way).

@@ -14,7 +14,8 @@ used it records its commit.
 | `core/quantize.py` | Metric lift, FPS cost curves, water-filling, MPQ, Lloyd refine, medoid delivery, video-level coreset. |
 | `core/assembly.py`, `core/budget.py` | Assemble the compressed sequence (with masses); even split used by the `even` ablation and the dumps. |
 | `mass_bias.py` | `beta = log m` as an additive attention-score bias. |
-| `adapters/pipeline.py` | Method `bv`: `policy=none` (vanilla) or `policy=mq`; inner-LLM stage is a deliberate no-op. |
+| `adapters/pipeline.py` | Method `bv`: `policy=none` (vanilla) or `policy=mq`. |
+| `llm_prune.py` | Method `bv`'s inner-LLM stage: `llm_prune=none` (default, no-op) or `fastv` (FlashVID's FastV with the mass vector carried through); the score bias around it. |
 | `flashvid_mass.py` | Method `fvmass`: FlashVID's own compression + FastV pruning, with the mass channel (`policy=flashvid_mass`). |
 | `recording.py` | Per-video dumps (`dump_dir=`). |
 | `configuration_budgetvid.py` | `FlashVidConfig` plus every knob below. |
@@ -35,6 +36,9 @@ lift_norm=False   # drop the RMSNorm from the lift
 centroid=plain    # unweighted mean instead of the metric centroid direction
 centroid=medoid   # deliver a real token (weighted coreset)
 refine=5          # Lloyd sweeps after FPS seeding
+
+# FlashVID's inner-LLM stage on top (budgetvid/llm_prune.py); FlashVID's own settings
+llm_prune=fastv,pruning_layer=20,llm_retention_ratio=0.3
 ```
 
 `retention_ratio` here is the fraction of visual tokens at the LLM input,
@@ -52,7 +56,8 @@ extracted. `text_sdpa=True` performs the switch on its own, for a backend contro
 
 ```bash
 for t in budgetvid/tests/test_mq.py budgetvid/tests/test_mq_pipeline.py \
-         budgetvid/tests/test_mq_video.py budgetvid/tests/test_flashvid_mass.py; do
+         budgetvid/tests/test_mq_video.py budgetvid/tests/test_flashvid_mass.py \\
+         budgetvid/tests/test_llm_prune.py; do
   uv run --no-project --python 3.11 --with torch --with numpy python $t
 done
 ```

@@ -38,7 +38,7 @@ _HEAVY = {"BudgetVidConfig"}
 def _load_heavy():
     """Import the FlashVID-dependent half and perform dispatch registration."""
     global nn, _apply_flashvid, register_compression, register_llm_pruning
-    global register_score_bias, apply_mass_bias
+    global register_score_bias
     global BudgetVidConfig, _loaded
 
     from torch import nn  # noqa: F811
@@ -46,18 +46,17 @@ def _load_heavy():
     from flashvid import flashvid as _apply_flashvid  # noqa: F811
     from flashvid.dispatch import (  # noqa: F811
         register_compression, register_llm_pruning, register_score_bias)
-    from .mass_bias import apply_mass_bias  # noqa: F811
     from .configuration_budgetvid import BudgetVidConfig  # noqa: F811
-    from .adapters.pipeline import budgetvid_pipeline, no_llm_pruning  # noqa: F811
+    from .adapters.pipeline import budgetvid_pipeline  # noqa: F811
+    from .llm_prune import bv_llm_pruning, mass_score_bias  # noqa: F811
 
     # The method this project's own experiments run under (MassVID = policy "mq").
     register_compression("bv", budgetvid_pipeline)
-    # `bv` has a single budget by construction, so the inner-LLM stage is a
-    # no-op. Without this the dispatch raises KeyError at `pruning_layer`.
-    register_llm_pruning("bv", no_llm_pruning)
-    # The mass channel of BudgetVID 2.0 (spec eq 5). A no-op for every policy
-    # that leaves `token_mass` unset, so the other rows are untouched.
-    register_score_bias("bv", apply_mass_bias)
+    # Inner-LLM stage: a no-op unless `llm_prune=fastv` (budgetvid/llm_prune.py).
+    register_llm_pruning("bv", bv_llm_pruning)
+    # The mass channel (spec eq 5). A no-op for every policy that leaves
+    # `token_mass` unset; switched off at decode after inner pruning.
+    register_score_bias("bv", mass_score_bias)
     # FlashVID itself with the mass channel added (budgetvid/flashvid_mass.py):
     # the plug-in test of whether log m helps a published merge-based method.
     from .flashvid_mass import (
@@ -178,7 +177,7 @@ def budgetvid(model: nn.Module, policy: str | None = None,
               lift: str = "kv", gamma_v: float = 1.0, lift_norm: bool = True,
               mq_alloc: str = "waterfill", centroid: str = "rms",
               b_max: int = 0, mass: bool = True, text_sdpa: bool = False,
-              refine: int = 0,
+              refine: int = 0, llm_prune: str = "none",
               dump_dir: str = "",
               **flashvid_kwargs) -> nn.Module:
     """Apply BudgetVID to the model.
@@ -201,6 +200,9 @@ def budgetvid(model: nn.Module, policy: str | None = None,
         b_max (int, optional): Cost-curve length cap; 0 means N_f.
         refine (int, optional): Lloyd sweeps after FPS seeding; 0 is the
             frozen v1 behaviour.
+        llm_prune (str, optional): Inner-LLM stage for ``policy="mq"``: "none"
+            (default) or "fastv" -- FlashVID's second stage at ``pruning_layer``
+            keeping ``llm_retention_ratio`` of the visual tokens.
         mass (bool, optional): The log-mass attention bias. Turning it off is
             the mandatory ablation and needs no other change.
         text_sdpa (bool, optional): Move the decoder to sdpa even when nothing
@@ -237,6 +239,7 @@ def budgetvid(model: nn.Module, policy: str | None = None,
         dump_dir=dump_dir,
         lift=lift, gamma_v=gamma_v, lift_norm=lift_norm, mq_alloc=mq_alloc,
         centroid=centroid, b_max=b_max, mass=mass, refine=refine,
+        llm_prune=llm_prune,
     )
     # Load the model under flash_attention_2 as usual -- the vision tower
     # demands it -- and move only the decoder to sdpa, which is what can carry

@@ -88,6 +88,7 @@ class Qwen2_5_VL(lmms):
         mass: bool = True,
         text_sdpa: bool = False,
         refine: int = 0,
+        llm_prune: str = "none",
         # Per-video signal/routing dumps (budgetvid/recording.py). Empty = off.
         dump_dir: str = "",
         **kwargs,
@@ -147,7 +148,7 @@ class Qwen2_5_VL(lmms):
                 policy=policy,
                 lift=lift, gamma_v=gamma_v, lift_norm=lift_norm,
                 mq_alloc=mq_alloc, centroid=centroid, b_max=b_max, mass=mass,
-                text_sdpa=text_sdpa, refine=refine,
+                text_sdpa=text_sdpa, refine=refine, llm_prune=llm_prune,
                 dump_dir=dump_dir,
                 retention_ratio=retention_ratio,
                 expansion=expansion,

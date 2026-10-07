@@ -23,6 +23,7 @@ import torch
 from ..core.assembly import assemble
 from ..core.budget import split_budget
 from ..core.quantize import compress_video, curve_cost
+from ..llm_prune import no_llm_pruning, reset_inner_state  # noqa: F401 (re-export)
 from ..mass_bias import clear_mass
 from ..recording import dump_record, frame_stats, make_tag
 
@@ -47,6 +48,7 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
     # Every sample starts with no mass: a stale vector from the previous video
     # would bias the wrong keys and never raise.
     clear_mass(flashvid_config)
+    reset_inner_state(flashvid_config)
 
     if policy == "none":
         g = torch.arange(L * N_f, dtype=torch.long, device=device)
@@ -109,6 +111,9 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
     tokens, gidx, mass = assemble(video_features, empty, merged=merged,
                                   expected_total=spent, masses=out["mass"])
     cfg.visual_token_length = int(tokens.shape[0])
+    # Kept for the inner-LLM record (llm_prune.py writes <tag>__llm.npz in this
+    # same global indexing); the caller shifts gidx in place afterwards.
+    cfg._bv_kept_g = gidx.detach().clone().cpu()
     # The mass channel. Off is the mandatory ablation (a conventional
     # mass-destroying merge), and it must travel this same code path so the two
     # rows differ in one thing only.
@@ -155,26 +160,3 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
                     frame_stats(cls_attention), cfg=cfg)
     return tokens, gidx
 
-
-def no_llm_pruning(hidden_states, causal_mask, attentions, cache_position,
-                   position_ids, position_embeddings, flashvid_config,
-                   visual_pos_masks=None):
-    """Inner-LLM pruning stage for method ``bv``: keep everything.
-
-    FlashVID carries a SECOND, independent budget -- the vision side keeps
-    `retention_ratio * expansion` of the tokens and layer `pruning_layer` then
-    cuts to `llm_retention_ratio` of what survived, which is why its headline
-    "R" is a per-layer average and its true visual-token count sits ~30% above
-    the naive r*N (experiments/flashvid_token_accounting).
-
-    This method has one budget by construction: B is the number of tokens the
-    LLM is given, and §2.2's budget equality is exact. Pruning again inside the
-    LLM would make the reported B a lie. So this is a deliberate no-op, not a
-    stub -- keep_indices is every position, and nothing else is touched.
-    """
-    keep = torch.arange(hidden_states.shape[1], device=hidden_states.device)
-    if cache_position is None:
-        cache_position = keep
-    if position_ids is None:
-        position_ids = keep.unsqueeze(0)
-    return hidden_states, causal_mask, position_ids, cache_position, position_embeddings, keep
