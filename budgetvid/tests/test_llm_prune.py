@@ -129,6 +129,25 @@ def main():
     h, m, *_ , keep = bv_llm_pruning(hidden, mask, attn, pos, pos.unsqueeze(0), emb, c3)
     check("mass=False: plain FlashVID output, mask only sliced", tuple(m.shape) == (1, 1, new_len, new_len) and c3.token_mass is None)
 
+    print("llm_prune=fastv, k=0 (layers after pruning_layer see no visual token):")
+    c4 = cfg(llm_prune="fastv", llm_retention_ratio=0.0, visual_token_start_index=n_before,
+             visual_token_length=n_vis, token_mass=mass.clone())
+    hidden, attn, pos, emb = sample(n_before, n_vis, n_after, d, hot=hot)
+    mask = torch.zeros(1, 1, L, L)
+    mask.masked_fill_(torch.ones(L, L, dtype=torch.bool).triu(1), floor)
+    mask[..., n_before:n_before + n_vis] += mass.float().log()
+    h, m, pid, cp, pe, keep = bv_llm_pruning(hidden, mask, attn, pos, pos.unsqueeze(0), emb, c4)
+    tl = n_before + n_after
+    check("keeps exactly the text tokens", keep.tolist() == list(range(n_before)) + list(range(n_before + n_vis, L)), str(keep.tolist()))
+    check("config length 0", c4.visual_token_length == 0)
+    check("empty mass vector", c4.token_mass.numel() == 0)
+    check("mask is text x text", tuple(m.shape) == (1, 1, tl, tl), str(tuple(m.shape)))
+    upper = torch.ones(tl, tl, dtype=torch.bool).triu(1)
+    check("causal, no bias anywhere", bool((m[0, 0][upper] <= floor / 2).all()) and torch.equal(m[0, 0][~upper], torch.zeros(int((~upper).sum()))))
+    check("hidden states are the text rows", torch.equal(h[0], hidden[0, keep]))
+    check("decode after k=0 pruning: mask untouched",
+          mass_score_bias(dec, torch.zeros(1, 1, d), torch.tensor([99]), c4) is dec)
+
     print("unknown mode:")
     try:
         bv_llm_pruning(hidden, mask, attn, pos, pos.unsqueeze(0), emb, cfg(llm_prune="bogus", visual_token_start_index=0, visual_token_length=1))
