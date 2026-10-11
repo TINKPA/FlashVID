@@ -593,6 +593,16 @@ class Llava_OneVision(lmms):
                         except Exception as e:
                             eval_logger.error(f"Error {e} in loading video")
                             image_tensor = None
+                            # The question now runs text-only, so no compression
+                            # entry resets the per-sample visual state; the
+                            # previous video's visual_token_length / mass would
+                            # make FastV index a visual span that is not there
+                            # (MVBench 2026-10-11: 187 undecodable clips, FastV
+                            # died with "selected index k out of range").
+                            if _cfg is not None:
+                                _cfg.visual_token_length = 0
+                                _cfg.token_mass = None
+                                _cfg.inner_pruned = False
 
                         task_type = "video"
                         placeholder_count = len(frames) if self.token_strategy == "multiple" else 1
