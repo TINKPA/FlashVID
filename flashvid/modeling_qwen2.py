@@ -17,7 +17,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs
-from .dispatch import prune
+from .dispatch import prune, score_bias
 from .configuration_flashvid import FlashVidConfig
 
 
@@ -82,6 +82,7 @@ def Qwen2Model_forward(
 
     assert all(decoder_layer.attention_type == "full_attention" for decoder_layer in self.layers[: self.config.num_hidden_layers])
     causal_mask = causal_mask_mapping["full_attention"]
+    causal_mask = score_bias(causal_mask, hidden_states, cache_position, flashvid_config, past_key_values)
     for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
         # Only prunes visual tokens in prefilling stage.
         if is_prefill:

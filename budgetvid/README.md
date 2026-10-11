@@ -60,6 +60,9 @@ for t in budgetvid/tests/test_mq.py budgetvid/tests/test_mq_pipeline.py \
          budgetvid/tests/test_llm_prune.py; do
   uv run --no-project --python 3.11 --with torch --with numpy python $t
 done
+# The patched Qwen2 decoder (LLaVA-OV path) carrying the bias; needs transformers
+uv run --no-project --python 3.11 --with torch --with "transformers==4.57.3" --with numpy \
+  python budgetvid/tests/test_qwen2_score_bias.py
 ```
 
 Three things fail silently rather than loudly, so they have tests: the mass
