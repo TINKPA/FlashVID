@@ -148,6 +148,22 @@ def main():
     check("decode after k=0 pruning: mask untouched",
           mass_score_bias(dec, torch.zeros(1, 1, d), torch.tensor([99]), c4) is dec)
 
+    print("pruning_layer != 20 (the stage itself never reads K; the decoder loop does, see test_pruning_layer.py):")
+    hidden, attn, pos, emb = sample(n_before, n_vis, n_after, d, hot=hot)
+    mask = torch.zeros(1, 1, L, L)
+    mask.masked_fill_(torch.ones(L, L, dtype=torch.bool).triu(1), floor)
+    mask[..., n_before:n_before + n_vis] += mass.float().log()
+    outs = {}
+    for K in (2, 8, 14, 20, 24):
+        cK = cfg(llm_prune="fastv", pruning_layer=K, visual_token_start_index=n_before,
+                 visual_token_length=n_vis, token_mass=mass.clone())
+        _, mK, *_, keepK = bv_llm_pruning(hidden, mask.clone(), attn, pos, pos.unsqueeze(0), emb, cK)
+        outs[K] = (keepK.tolist(), mK, cK.token_mass.tolist(), cK.visual_token_length)
+    ref = outs[20]
+    for K in (2, 8, 14, 24):
+        check(f"K={K}: same kept positions, mask, mass and length as K=20",
+              outs[K][0] == ref[0] and torch.equal(outs[K][1], ref[1]) and outs[K][2] == ref[2] and outs[K][3] == ref[3])
+
     print("unknown mode:")
     try:
         bv_llm_pruning(hidden, mask, attn, pos, pos.unsqueeze(0), emb, cfg(llm_prune="bogus", visual_token_start_index=0, visual_token_length=1))
