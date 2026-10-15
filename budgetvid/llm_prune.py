@@ -77,8 +77,11 @@ def fastv_prune_keep_mass(hidden_states, causal_mask, attentions, cache_position
         visual_pos_masks=visual_pos_masks,
     )
     hidden_states, causal_mask, position_ids, cache_position, position_embeddings, keep_indices = out
-    in_span = (keep_indices >= start) & (keep_indices < start + n_before)
-    ranks = keep_indices[in_span] - start          # kept visual tokens, as ranks into the input span
+    # Kept visual tokens, as ranks into the delivered visual list. By position, not by span:
+    # on Qwen3 non-visual tokens sit inside the span (budgetvid/visual_positions.py).
+    from .visual_positions import kept_ranks, positions_of, remap_after_keep
+    ranks = kept_ranks(flashvid_config, keep_indices, n_before)
+    remap_after_keep(flashvid_config, keep_indices, ranks)
     if ranks.numel() != int(flashvid_config.visual_token_length):
         raise AssertionError(
             f"fastv prune: kept {ranks.numel()} visual tokens but the config says "
@@ -97,7 +100,7 @@ def fastv_prune_keep_mass(hidden_states, causal_mask, attentions, cache_position
     rebuilt = torch.zeros_like(causal_mask)
     rebuilt.masked_fill_(causal_mask <= floor / 2, floor)
     beta = m_kept.to(torch.float32).clamp(min=1.0).log().to(causal_mask.dtype)
-    rebuilt[..., start:start + m_kept.numel()] += beta
+    rebuilt[..., positions_of(flashvid_config, m_kept.numel(), device=rebuilt.device)] += beta
     return hidden_states, rebuilt, position_ids, cache_position, position_embeddings, keep_indices
 
 

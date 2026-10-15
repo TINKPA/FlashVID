@@ -194,7 +194,10 @@ def wrap_flashvid_keep(dump_dir: str) -> None:
         if g is not None:
             cfg._bv_fv_g = None                  # first prefill only
             keep = out[-1].detach().cpu()
-            ranks = keep[(keep >= start) & (keep < start + length)] - start
+            # By position, not by span (Qwen3 interleaves non-visual tokens; visual_positions.py).
+            from .visual_positions import kept_ranks
+            ranks = kept_ranks(cfg, keep, length).cpu() if getattr(cfg, "visual_token_positions", None) is not None \
+                else keep[(keep >= start) & (keep < start + length)] - start
             meta = {"method": "flashvid", "stage": "inner_llm",
                     "pruning_layer": int(getattr(cfg, "pruning_layer", -1)),
                     "llm_retention_ratio": float(getattr(cfg, "llm_retention_ratio", -1.0)),

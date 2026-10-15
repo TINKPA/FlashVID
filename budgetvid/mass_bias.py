@@ -69,9 +69,11 @@ def apply_mass_bias(causal_mask, hidden_states, cache_position, flashvid_config,
         past = past_key_values.get_seq_length() if past_key_values is not None else 0
         kv_len = int(past) + q_len
 
-    if start + n_vis > kv_len:
+    from .visual_positions import positions_of
+    pos = positions_of(flashvid_config, n_vis, device=device)   # contiguous unless Qwen3 recorded them
+    if n_vis and int(pos.max()) >= kv_len:
         raise ValueError(
-            f"visual span [{start}, {start + n_vis}) does not fit a {kv_len}-token "
+            f"visual keys up to {int(pos.max())} do not fit a {kv_len}-token "
             "sequence; the mass vector and the compressed sequence disagree")
 
     if causal_mask is None:
@@ -92,13 +94,15 @@ def apply_mass_bias(causal_mask, hidden_states, cache_position, flashvid_config,
         mask = causal_mask.clone().to(dtype)
 
     beta = m.to(device=device, dtype=torch.float32).clamp(min=1.0).log().to(dtype)
-    mask[..., start:start + n_vis] += beta
+    mask[..., pos] += beta
     if not getattr(flashvid_config, "_mass_logged", False):
         # Once per process. The bias landing on the wrong slice, or not landing
         # at all, is the failure mode that produces a plausible number instead
         # of an error, so the span and the mass range go in the run log.
         flashvid_config._mass_logged = True
-        print(f"[BV] log-mass bias live: keys [{start}, {start + n_vis}) of {kv_len} "
+        contiguous = bool(n_vis == 0 or int(pos[-1]) - int(pos[0]) + 1 == n_vis)
+        print(f"[BV] log-mass bias live: {n_vis} keys in [{int(pos[0]) if n_vis else start}, "
+              f"{int(pos[-1]) + 1 if n_vis else start}) ({'contiguous' if contiguous else 'interleaved'}) of {kv_len} "
               f"(q_len {q_len}), "
               f"m in [{int(m.min())}, {int(m.max())}], beta max {float(beta.max()):.2f}",
               flush=True)
@@ -113,3 +117,4 @@ def clear_mass(flashvid_config) -> None:
     previous sample's mass vector and bias the wrong keys.
     """
     flashvid_config.token_mass = None
+    flashvid_config.visual_token_positions = None

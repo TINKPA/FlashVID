@@ -340,6 +340,7 @@ def Qwen3VLModel_forward(
             .sort()
             .values
         )
+        flashvid_config.visual_token_positions = torch.searchsorted(keep_global_indexes, visual_token_indexes[keep_visual_global_indices])  # budgetvid/visual_positions.py
 
         hidden_size = inputs_embeds.size(-1)
         assert visual_token_indexes[keep_visual_global_indices].shape[0] == compressed_video_tokens.view(-1, hidden_size).shape[0]
