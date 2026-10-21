@@ -2,6 +2,13 @@ import os
 import time
 from typing import List
 
+import torch
+
+try:
+    import decord
+except ImportError:
+    decord = None
+
 from loguru import logger as eval_logger
 from tqdm import tqdm
 
@@ -99,7 +106,35 @@ class Qwen3_VL(Qwen3_VLSimple):
                 # limit the number of frames in case fps is set
                 video_kwargs["max_frames"] = self.max_num_frames
             else:
-                video_kwargs["nframes"] = self.max_num_frames
+                # Probe the video and clamp nframes = min(max_num_frames, total_frames), floored
+                # to even (qwen_vl_utils' FRAME_FACTOR). Ported from chat/qwen2_5_vl.py on
+                # 2026-10-20: without it qwen_vl_utils raises "nframes should in interval
+                # [2, 30], but got 32" on MVBench's ~30-frame TVQA clips (3 fps) and the whole
+                # run dies at that clip (CARC job 13276631, every row). Also records which
+                # source frames the model saw for the compression dump, as the Qwen2.5 path does.
+                if videos and decord is not None:
+                    try:
+                        video_path = videos[0]  # batch size 1 for videos
+                        vr = decord.VideoReader(video_path)
+                        video_total_frames = len(vr)
+                        nframes = min(self.max_num_frames, video_total_frames)
+                        nframes = (nframes // 2) * 2
+                        nframes = max(2, nframes)
+                        video_kwargs["nframes"] = nframes
+                        if _cfg is not None:
+                            _cfg.dump_frames = {
+                                "source_frames": int(video_total_frames),
+                                "source_fps": float(vr.get_avg_fps()),
+                                "nframes": int(nframes),
+                                "indices": torch.linspace(0, video_total_frames - 1, nframes)
+                                                .round().long().tolist(),
+                                "index_rule": "qwen_vl_utils: linspace(0, total-1, nframes).round()",
+                            }
+                    except Exception as e:
+                        eval_logger.warning(f"Failed to probe video {videos[0]}: {e}, using default nframes")
+                        video_kwargs["nframes"] = self.max_num_frames
+                else:
+                    video_kwargs["nframes"] = self.max_num_frames
             batched_messages = [chat_message.to_hf_messages(video_kwargs=video_kwargs) for chat_message in chat_messages]
             texts = self.processor.apply_chat_template(batched_messages, tokenize=False, add_generation_prompt=True)
             image_inputs, video_inputs, video_kwargs_qwen = process_vision_info(
