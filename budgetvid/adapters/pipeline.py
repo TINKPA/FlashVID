@@ -97,6 +97,7 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
     isolates what the allocation alone is worth.
     """
     W_k, W_v, g = _lift_params(cfg, video_features.device, video_features.dtype)
+    want_eff = bool(getattr(cfg, "mass_eff", False))
     out = compress_video(
         video_features, B, W_k=W_k, W_v=W_v, g=g,
         gamma_v=float(getattr(cfg, "gamma_v", 1.0)),
@@ -104,6 +105,8 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
         centroid=str(getattr(cfg, "centroid", "rms")),
         b_max=int(getattr(cfg, "b_max", 0)),
         refine=int(getattr(cfg, "refine", 0)),
+        protect=float(getattr(cfg, "protect", 0.0)),
+        mass_eff=want_eff,
     )
     spent = int(out["b"].sum())
     empty = [torch.empty(0, dtype=torch.long, device=video_features.device)] * L
@@ -118,6 +121,16 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
     # mass-destroying merge), and it must travel this same code path so the two
     # rows differ in one thing only.
     cfg.token_mass = mass if bool(getattr(cfg, "mass", True)) else None
+    cfg.token_mass_eff = None
+    if want_eff and cfg.token_mass is not None:
+        # Same order as the tokens: replicate assemble()'s sort (per-frame concat
+        # of the seeds' global indices, then argsort). Asserted against gidx so
+        # a divergence fails loudly rather than biasing the wrong keys.
+        g_cat = torch.cat([t * N_f + out["seed_idx"][t].to(torch.long) for t in range(L)])
+        order = g_cat.argsort()
+        if not torch.equal(g_cat[order], gidx):
+            raise AssertionError("mass_eff ordering diverged from assemble()'s")
+        cfg.token_mass_eff = torch.cat(out["mass_eff"], 0)[order]
 
     dump_dir = str(getattr(cfg, "dump_dir", "") or "")
     if dump_dir:
@@ -127,9 +140,11 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
         # offline-replay note (does water-filling beat the even split on
         # quantization cost, and by how much) as a by-product of the run itself.
         alloc = str(getattr(cfg, "mq_alloc", "waterfill"))
-        if alloc == "video":
-            # One video-level curve, not per-frame ones: there is no per-frame
-            # allocation to price, so both lookups are just the realized cost.
+        if alloc == "video" or "protected" in out:
+            # video: one video-level curve, no per-frame allocation to price.
+            # protect: out["b"] counts delivered tokens (protected included), so
+            # it no longer indexes the open-seed curves; the counterfactual is
+            # not comparable and is skipped rather than silently mispriced.
             cost_even = cost_wf = out["cost"]
         else:
             b_alt = split_budget(B, L, N_f).to(out["b"].device) \
@@ -139,11 +154,19 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
         b_full = torch.zeros(L, N_f, dtype=torch.int32)
         for t, mm in enumerate(out["mass"]):
             b_full[t, out["seed_idx"][t].cpu().long()] = mm.cpu().to(torch.int32)
+        extras = {"mass_map": b_full, "kept_g": gidx, "b_t": out["b"],
+                  "b_even": b_t, "group_of": out["group_of"]}
+        if "protected" in out:
+            extras["protected"] = out["protected"]
+        if "mass_eff" in out:
+            me_full = torch.zeros(L, N_f, dtype=torch.float32)
+            for t, mm in enumerate(out["mass_eff"]):
+                me_full[t, out["seed_idx"][t].cpu().long()] = mm.cpu()
+            extras["mass_eff_map"] = me_full
         dump_record(dump_dir, make_tag(cfg),
                     {"I_raw": cls_attention, "radius": out["radius"],
                      "D": out["D"], "r_curve": out["r"]},
-                    {"mass_map": b_full, "kept_g": gidx, "b_t": out["b"],
-                     "b_even": b_t, "group_of": out["group_of"]},
+                    extras,
                     {"method": "bv", "policy": "mq", "L": L, "N_f": N_f,
                      "retention_ratio": float(cfg.retention_ratio), "B": B,
                      "B_spent": spent,
@@ -154,6 +177,10 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
                      "centroid": str(getattr(cfg, "centroid", "rms")),
                      "refine": int(getattr(cfg, "refine", 0)),
                      "mass": bool(getattr(cfg, "mass", True)),
+                     "protect": float(getattr(cfg, "protect", 0.0)),
+                     "n_protected": int(out.get("n_protected", 0)),
+                     "mass_cap": float(getattr(cfg, "mass_cap", 0.0)),
+                     "mass_eff": bool(getattr(cfg, "mass_eff", False)),
                      "cost": out["cost"], "planned": out["planned"],
                      "cost_taken": cost_wf, "cost_even": cost_even,
                      "spec": "2026-08-28_method_budgetvid2_v1"},

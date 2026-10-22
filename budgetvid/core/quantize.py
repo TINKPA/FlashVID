@@ -101,7 +101,7 @@ def metric_lift(x: torch.Tensor, W_k: torch.Tensor | None, W_v: torch.Tensor | N
 # Stage 1: CBA -- achievable-cost curves (spec eq 2, B.3)
 # --------------------------------------------------------------------------
 
-def fps_curves(K: torch.Tensor, b_max: int):
+def fps_curves(K: torch.Tensor, b_max: int, exclude: torch.Tensor | None = None):
     """Farthest-point sampling with the cost curves it produces on the way.
 
     One pass over ``b_max`` steps, run for every frame at once. The seed sets are
@@ -116,6 +116,14 @@ def fps_curves(K: torch.Tensor, b_max: int):
     Args:
         K: [L, N_f, C] lifted coordinates.
         b_max: how far to run the curve; ``<= N_f``.
+        exclude: optional [L, N_f] bool mask of tokens that may never become
+            seeds (the protected singletons, delivered separately). They still
+            count as points to cover, so the curves price covering them with
+            the open seeds -- pessimistic for a protected outlier, which is
+            fine: it IS expensive to cover, that is why it was protected. A
+            frame with p excluded tokens has only ``N_f - p`` selectable seeds;
+            the caller must cap that frame's allocation accordingly (the
+            columns beyond it repeat the last seed and are never read).
 
     Returns:
         ``(seeds, D, r)`` with seeds [L, b_max] (int64) and D, r [L, b_max]
@@ -143,7 +151,15 @@ def fps_curves(K: torch.Tensor, b_max: int):
     # sequence a permutation prefix unconditionally, and changes nothing before
     # saturation, where the residuals are positive and the mask is inert.
     taken = torch.zeros(L, N_f, dtype=torch.bool, device=K.device)
-    first = _argmax_first(delta)
+    if exclude is not None:
+        if exclude.shape != (L, N_f):
+            raise ValueError(f"exclude shape {tuple(exclude.shape)} != ({L}, {N_f})")
+        if bool(exclude.all(dim=1).any()):
+            raise ValueError("a frame has every token excluded; nothing can seed it")
+        taken |= exclude.to(device=K.device, dtype=torch.bool)
+        first = _argmax_first(delta.masked_fill(taken, -1.0))
+    else:
+        first = _argmax_first(delta)
     seeds[:, 0] = first
     taken.scatter_(1, first.unsqueeze(1), True)
 
@@ -350,7 +366,8 @@ def lloyd_refine(Kt: torch.Tensor, sid: torch.Tensor, iters: int):
 
 def quantize_frames(K: torch.Tensor, x: torch.Tensor, s: torch.Tensor,
                     seeds: torch.Tensor, b: torch.Tensor, centroid: str = "rms",
-                    refine: int = 0, assign_out: list | None = None):
+                    refine: int = 0, assign_out: list | None = None,
+                    closed: list | None = None, mass_eff_out: list | None = None):
     """Assign every token to its nearest seed and deliver one token per group.
 
     Args:
@@ -365,6 +382,15 @@ def quantize_frames(K: torch.Tensor, x: torch.Tensor, s: torch.Tensor,
         assign_out: if a list is given, each frame's assignment [N_f] (the
             index into that frame's delivered tokens that every token joined)
             is appended to it -- recorded for analysis, never used downstream.
+        closed: optional per-frame LongTensors of PROTECTED token indices,
+            appended after the open seeds as closed groups: no other token may
+            join them, so each is delivered verbatim with m=1 (rms delivery of
+            a singleton is the identity). Disjoint from ``seeds[t, :b[t]]`` by
+            construction upstream (fps_curves excluded them from seeding).
+        mass_eff_out: if a list is given, each frame's effective mass [k]
+            (``m_eff_j = sum_{i in j} exp(-d_i / tau_t)``, tau_t = mean positive
+            member-to-center distance of the frame) is appended. Pure groups
+            keep m_eff = m; scattered groups decay toward 1.
 
     Returns:
         ``(feats, seed_idx, mass, cost)`` -- lists of length L holding, per
@@ -377,11 +403,23 @@ def quantize_frames(K: torch.Tensor, x: torch.Tensor, s: torch.Tensor,
     for t in range(L):
         k = int(b[t])
         sid = seeds[t, :k]
+        prot = None
+        if closed is not None and closed[t].numel():
+            if refine:
+                raise ValueError("closed (protected) seeds are not implemented with refine > 0")
+            prot = closed[t].to(sid.device, torch.long)
+            sid = torch.cat([sid, prot])
         if refine:
             a, sid = lloyd_refine(K[t], sid, refine)
             a = a.clone()
         else:
-            d = torch.cdist(K[t].unsqueeze(0), K[t, sid].unsqueeze(0)).squeeze(0)  # [N_f, k]
+            d = torch.cdist(K[t].unsqueeze(0), K[t, sid].unsqueeze(0)).squeeze(0)  # [N_f, k(+p)]
+            if prot is not None:
+                # Closed columns: nobody may join a protected group. The
+                # protected token itself is routed home by the self-assignment
+                # override below, so the +inf here only diverts OTHER tokens to
+                # their nearest open seed.
+                d[:, k:] = float("inf")
             a = _argmin_first(d)
             # Seed self-assignment, stated in the spec as the reason m_j >= 1
             # holds. Forcing it also removes the one way a group could come out
@@ -389,6 +427,7 @@ def quantize_frames(K: torch.Tensor, x: torch.Tensor, s: torch.Tensor,
             # static frame), where the tie-break would hand every token to the
             # first.
             a = a.clone()
+        k = int(sid.numel())
         a[sid] = torch.arange(k, device=a.device)
 
         m = torch.bincount(a, minlength=k)
@@ -433,7 +472,19 @@ def quantize_frames(K: torch.Tensor, x: torch.Tensor, s: torch.Tensor,
         if assign_out is not None:
             assign_out.append(a)
         dd = torch.cdist(K[t].unsqueeze(0), K[t, sid].unsqueeze(0)).squeeze(0)
-        cost.append(float(dd.gather(1, a.unsqueeze(1)).sum()))
+        d_own = dd.gather(1, a.unsqueeze(1)).squeeze(1)
+        cost.append(float(d_own.sum()))
+        if mass_eff_out is not None:
+            # Effective mass: members count by proximity to the group's SEED
+            # (the anchor the distances already exist for), on the frame's own
+            # scale tau_t. A pure group (all d=0) keeps m_eff = m exactly; a
+            # group holding its seed plus far-flung strays decays toward 1.
+            pos = d_own[d_own > 0]
+            tau = float(pos.mean()) if pos.numel() else 1.0
+            w = torch.exp(-d_own / max(tau, 1e-9))
+            me = torch.zeros(k, device=K.device, dtype=torch.float32)
+            me.index_add_(0, a, w.float())
+            mass_eff_out.append(me.clamp(min=1.0))
     return feats, seed_idx, mass, cost
 
 
@@ -533,10 +584,35 @@ def _quantize_video(K, x, s, B, centroid):
     return out_f, out_i, out_m, b, float(cost[0]), radius, D, r, group_of
 
 
+def isolation_scores(K: torch.Tensor) -> torch.Tensor:
+    """Within-frame nearest-neighbor distance of every token, in the lifted space.
+
+    The protection channel's selection signal: a token far from everything else
+    in its own frame carries information no centroid can keep (small text, a
+    transient detail), while a duplicated token scores 0 and can never be
+    protected. Within-frame on purpose -- cross-frame isolation would conflate
+    temporal novelty with spatial uniqueness, and the frames are the unit the
+    rest of the pipeline allocates over.
+
+    Args:
+        K: [L, N_f, C] lifted coordinates.
+
+    Returns:
+        [L, N_f] float32 nearest-neighbor distances.
+    """
+    L, N_f, _ = K.shape
+    nn = torch.empty(L, N_f, dtype=torch.float32, device=K.device)
+    for t in range(L):   # per frame: keeps peak memory at N_f^2, not (L*N_f)^2
+        d = torch.cdist(K[t].unsqueeze(0), K[t].unsqueeze(0)).squeeze(0)
+        d.fill_diagonal_(float("inf"))
+        nn[t] = d.min(dim=1).values
+    return nn
+
+
 def compress_video(x: torch.Tensor, B: int, W_k=None, W_v=None, g=None,
                    gamma_v: float = 1.0, alloc: str = "waterfill",
                    centroid: str = "rms", b_max: int = 0, eps: float = 1e-6,
-                   refine: int = 0):
+                   refine: int = 0, protect: float = 0.0, mass_eff: bool = False):
     """Algorithm 2.0 end to end, on one video's visual tokens.
 
     Args:
@@ -550,12 +626,21 @@ def compress_video(x: torch.Tensor, B: int, W_k=None, W_v=None, g=None,
         b_max: cap on the curve length; 0 means N_f (exact).
         refine: Lloyd sweeps after the FPS seeding, 0 = off (the frozen v1
             behaviour). See ``lloyd_refine`` for why this exists.
+        protect: fraction of B delivered as PROTECTED singletons -- the
+            globally most isolated tokens (``isolation_scores``), each its own
+            closed group with m=1, delivered verbatim. The remaining budget is
+            allocated and quantized exactly as before. 0 = off (frozen path).
+        mass_eff: also compute each group's effective mass (see
+            ``quantize_frames``), returned as ``mass_eff`` per frame.
 
     Returns:
-        dict with ``feats``/``seed_idx``/``mass`` (per frame), ``b`` [L],
+        dict with ``feats``/``seed_idx``/``mass`` (per frame), ``b`` [L]
+        (tokens DELIVERED per frame, protected included; sums to B),
         ``group_of`` [L, N_f] (for every token, the global index of the token
         its group was delivered as),
-        ``cost`` (realized), ``planned`` (envelope), ``radius`` [L].
+        ``cost`` (realized), ``planned`` (envelope), ``radius`` [L],
+        and with ``protect > 0`` also ``protected`` [L, N_f] (bool) and
+        ``n_protected``; with ``mass_eff`` also ``mass_eff`` (per frame).
     """
     L, N_f, _ = x.shape
     if not (L <= B <= L * N_f):
@@ -564,16 +649,53 @@ def compress_video(x: torch.Tensor, B: int, W_k=None, W_v=None, g=None,
     if alloc == "video":
         if refine:
             raise ValueError("refine is not implemented for alloc='video'")
+        if protect > 0 or mass_eff:
+            raise ValueError("protect / mass_eff are not implemented for alloc='video'")
         feats, seed_idx, mass, b, cost, radius, D, r, group_of = _quantize_video(K, x, s, B, centroid)
         return {"feats": feats, "seed_idx": seed_idx, "mass": mass, "b": b,
                 "cost": cost, "planned": cost, "radius": radius, "D": D, "r": r,
                 "group_of": group_of}
+
+    prot_mask = None
+    prot_lists = None
+    n_p = 0
+    if protect > 0:
+        if alloc != "waterfill":
+            raise ValueError("protect requires alloc='waterfill'")
+        if refine:
+            raise ValueError("protect is not implemented with refine > 0")
+        n_p = int(round(protect * B))
+        if n_p > 0:
+            if B - n_p < L:
+                raise ValueError(
+                    f"protect={protect} leaves B'={B - n_p} < L={L}; every frame "
+                    "still needs one open seed")
+            nn = isolation_scores(K).reshape(-1)
+            # Stable descending sort, not topk: ties (common among near-duplicate
+            # tokens) must break by index so the selection is deterministic.
+            order = torch.argsort(nn, descending=True, stable=True)[:n_p]
+            prot_mask = torch.zeros(L * N_f, dtype=torch.bool, device=K.device)
+            prot_mask[order] = True
+            prot_mask = prot_mask.reshape(L, N_f)
+            # A frame of all-protected tokens cannot seed; cap protection there.
+            full = prot_mask.sum(1) >= N_f
+            if bool(full.any()):
+                for t in torch.nonzero(full).flatten().tolist():
+                    drop = torch.nonzero(prot_mask[t]).flatten()[-1]
+                    prot_mask[t, drop] = False
+                n_p = int(prot_mask.sum())
+            prot_lists = [torch.nonzero(prot_mask[t]).flatten() for t in range(L)]
+
     bm = N_f if b_max <= 0 else int(min(b_max, N_f))
-    seeds, D, r = fps_curves(K, bm)
+    seeds, D, r = fps_curves(K, bm, exclude=prot_mask)
 
     if alloc == "waterfill":
         Dbar = lower_convex_envelope(D)
-        b = waterfill(Dbar, B, r=r)
+        caps = None
+        if prot_mask is not None:
+            caps = (torch.full((L,), N_f, dtype=torch.long, device=K.device)
+                    - prot_mask.sum(1))
+        b = waterfill(Dbar, B - n_p, r=r, caps=caps)
         planned = float(sum(Dbar[t, int(b[t]) - 1] for t in range(L)))
     elif alloc == "even":
         from .budget import split_budget
@@ -585,15 +707,28 @@ def compress_video(x: torch.Tensor, B: int, W_k=None, W_v=None, g=None,
         raise KeyError(f"unknown allocation '{alloc}'; known: waterfill, even")
 
     assign = []
+    me_out = [] if mass_eff else None
     feats, seed_idx, mass, cost = quantize_frames(K, x, s, seeds, b, centroid, refine,
-                                                  assign_out=assign)
+                                                  assign_out=assign, closed=prot_lists,
+                                                  mass_eff_out=me_out)
+    # radius is read off the curves at the OPEN seed count; delivered count b may
+    # additionally hold the frame's protected singletons.
+    radius = torch.stack([r[t, int(b[t]) - 1] for t in range(L)])
+    if prot_lists is not None:
+        b = b + torch.tensor([p.numel() for p in prot_lists], dtype=b.dtype, device=b.device)
     # every token -> global index (t * N_f + i) of the token its group was delivered as
     group_of = torch.stack([t * N_f + seed_idx[t][assign[t]] for t in range(L)])
-    return {"feats": feats, "seed_idx": seed_idx, "mass": mass, "b": b,
-            "group_of": group_of,
-            "cost": float(sum(cost)), "planned": planned,
-            "radius": torch.stack([r[t, int(b[t]) - 1] for t in range(L)]),
-            "D": D, "r": r}
+    out = {"feats": feats, "seed_idx": seed_idx, "mass": mass, "b": b,
+           "group_of": group_of,
+           "cost": float(sum(cost)), "planned": planned,
+           "radius": radius,
+           "D": D, "r": r}
+    if me_out is not None:
+        out["mass_eff"] = me_out
+    if prot_mask is not None:
+        out["protected"] = prot_mask
+        out["n_protected"] = n_p
+    return out
 
 
 def curve_cost(D: torch.Tensor, b: torch.Tensor) -> float:

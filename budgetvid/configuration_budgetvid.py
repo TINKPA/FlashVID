@@ -50,6 +50,19 @@ class BudgetVidConfig(FlashVidConfig):
     # conventional mass-destroying merge. Requires an attention implementation
     # that accepts an additive mask -- sdpa or eager, never flash_attention_2.
     mass: bool = field(default=True)
+    # --- 2026-10-21 iteration knobs (notes/2026-10-21_experiment_protect-massform.html) ---
+    # Protected singleton channel: this fraction of B is delivered as untouched
+    # m=1 tokens, chosen by within-frame nearest-neighbor isolation in the lifted
+    # space; the rest of the budget is clustered as usual. 0 = off (frozen path).
+    protect: float = field(default=0.0)
+    # Cap on the mass the BIAS sees: beta = log(min(m, mass_cap)). The true mass
+    # vector (audits, dumps) is untouched. 0 = off.
+    mass_cap: float = field(default=0.0)
+    # Effective mass: the bias uses m_eff_j = sum_i exp(-d_ij / tau_t) instead of
+    # m_j, so only members close to the delivered center count. Pure group ->
+    # log m unchanged; scattered group -> bias decays toward 0. True mass is
+    # kept for accounting.
+    mass_eff: bool = field(default=False)
     # Inner-LLM stage for method bv: "none" (one budget, every layer sees B
     # tokens) or "fastv" (FlashVID's second stage, unchanged: at `pruning_layer`
     # keep `llm_retention_ratio` of the visual tokens by last-query attention).

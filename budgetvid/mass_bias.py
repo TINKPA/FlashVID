@@ -93,7 +93,7 @@ def apply_mass_bias(causal_mask, hidden_states, cache_position, flashvid_config,
     else:
         mask = causal_mask.clone().to(dtype)
 
-    beta = m.to(device=device, dtype=torch.float32).clamp(min=1.0).log().to(dtype)
+    beta = bias_mass(flashvid_config).to(device=device).to(dtype)
     mask[..., pos] += beta
     if not getattr(flashvid_config, "_mass_logged", False):
         # Once per process. The bias landing on the wrong slice, or not landing
@@ -101,12 +101,37 @@ def apply_mass_bias(causal_mask, hidden_states, cache_position, flashvid_config,
         # of an error, so the span and the mass range go in the run log.
         flashvid_config._mass_logged = True
         contiguous = bool(n_vis == 0 or int(pos[-1]) - int(pos[0]) + 1 == n_vis)
+        cap = float(getattr(flashvid_config, "mass_cap", 0.0) or 0.0)
+        eff = getattr(flashvid_config, "token_mass_eff", None) is not None
         print(f"[BV] log-mass bias live: {n_vis} keys in [{int(pos[0]) if n_vis else start}, "
               f"{int(pos[-1]) + 1 if n_vis else start}) ({'contiguous' if contiguous else 'interleaved'}) of {kv_len} "
               f"(q_len {q_len}), "
-              f"m in [{int(m.min())}, {int(m.max())}], beta max {float(beta.max()):.2f}",
+              f"m in [{int(m.min())}, {int(m.max())}], beta max {float(beta.max()):.2f}"
+              + (f", mass_cap {cap:g}" if cap > 0 else "")
+              + (", effective mass" if eff else ""),
               flush=True)
     return mask
+
+
+def bias_mass(flashvid_config) -> torch.Tensor:
+    """The beta vector the bias applies: log of the (shaped) mass.
+
+    The TRUE mass (``token_mass``) is what audits and dumps see; the bias may
+    read a reshaped view of it:
+      - ``token_mass_eff`` (set by the pipeline under ``mass_eff=True``): the
+        purity-weighted effective mass, same length and order as ``token_mass``.
+      - ``mass_cap > 0``: beta = log(min(m, cap)) -- the G2TM-motivated cap on
+        how much weight a big group may claim.
+    Returns a float32 tensor shaped like ``token_mass``.
+    """
+    m = flashvid_config.token_mass
+    me = getattr(flashvid_config, "token_mass_eff", None)
+    src = me if me is not None else m
+    src = src.to(torch.float32).clamp(min=1.0)
+    cap = float(getattr(flashvid_config, "mass_cap", 0.0) or 0.0)
+    if cap > 0:
+        src = src.clamp(max=cap)
+    return src.log()
 
 
 def clear_mass(flashvid_config) -> None:
@@ -117,4 +142,5 @@ def clear_mass(flashvid_config) -> None:
     previous sample's mass vector and bias the wrong keys.
     """
     flashvid_config.token_mass = None
+    flashvid_config.token_mass_eff = None
     flashvid_config.visual_token_positions = None

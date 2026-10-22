@@ -178,6 +178,7 @@ def budgetvid(model: nn.Module, policy: str | None = None,
               mq_alloc: str = "waterfill", centroid: str = "rms",
               b_max: int = 0, mass: bool = True, text_sdpa: bool = False,
               refine: int = 0, llm_prune: str = "none",
+              protect: float = 0.0, mass_cap: float = 0.0, mass_eff: bool = False,
               dump_dir: str = "",
               **flashvid_kwargs) -> nn.Module:
     """Apply BudgetVID to the model.
@@ -205,6 +206,13 @@ def budgetvid(model: nn.Module, policy: str | None = None,
             keeping ``llm_retention_ratio`` of the visual tokens.
         mass (bool, optional): The log-mass attention bias. Turning it off is
             the mandatory ablation and needs no other change.
+        protect (float, optional): Fraction of the budget delivered as protected
+            m=1 singletons (within-frame NN isolation in the lifted space); the
+            rest is clustered as usual. 0 = off (the frozen path).
+        mass_cap (float, optional): Cap the mass the BIAS sees:
+            beta = log(min(m, mass_cap)). True mass is untouched. 0 = off.
+        mass_eff (bool, optional): Bias from the purity-weighted effective mass
+            instead of the raw group size; true mass is kept for accounting.
         text_sdpa (bool, optional): Move the decoder to sdpa even when nothing
             requires it. Implied by ``policy="mq"`` with ``mass=True``; set it
             by hand on a NON-2.0 policy to measure what the backend switch
@@ -240,6 +248,7 @@ def budgetvid(model: nn.Module, policy: str | None = None,
         lift=lift, gamma_v=gamma_v, lift_norm=lift_norm, mq_alloc=mq_alloc,
         centroid=centroid, b_max=b_max, mass=mass, refine=refine,
         llm_prune=llm_prune,
+        protect=protect, mass_cap=mass_cap, mass_eff=mass_eff,
     )
     # Load the model under flash_attention_2 as usual -- the vision tower
     # demands it -- and move only the decoder to sdpa, which is what can carry
@@ -263,6 +272,7 @@ def budgetvid(model: nn.Module, policy: str | None = None,
     if policy == "mq":
         config.lift_params = _capture_lift(model)
         config.token_mass = None
+        config.token_mass_eff = None
     if policy == "flashvid_mass":
         # FlashVID's own compression and pruning, instrumented for the mass
         # channel (budgetvid/flashvid_mass.py); every FlashVID kwarg still applies.

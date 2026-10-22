@@ -93,13 +93,19 @@ def fastv_prune_keep_mass(hidden_states, causal_mask, attentions, cache_position
         return out
     m_kept = m.to(keep_indices.device)[ranks]
     flashvid_config.token_mass = m_kept
+    me = getattr(flashvid_config, "token_mass_eff", None)
+    if me is not None:
+        # The effective-mass view must survive the prune in lockstep with the
+        # true mass, or the bias below reads a stale, mis-indexed vector.
+        flashvid_config.token_mass_eff = me.to(keep_indices.device)[ranks]
 
     if causal_mask is None or causal_mask.dtype == torch.bool:
         raise AssertionError("fastv prune: expected the additive float mask the prefill bias built")
     floor = torch.finfo(causal_mask.dtype).min
     rebuilt = torch.zeros_like(causal_mask)
     rebuilt.masked_fill_(causal_mask <= floor / 2, floor)
-    beta = m_kept.to(torch.float32).clamp(min=1.0).log().to(causal_mask.dtype)
+    from .mass_bias import bias_mass
+    beta = bias_mass(flashvid_config).to(device=rebuilt.device).to(causal_mask.dtype)
     rebuilt[..., positions_of(flashvid_config, m_kept.numel(), device=rebuilt.device)] += beta
     return hidden_states, rebuilt, position_ids, cache_position, position_embeddings, keep_indices
 

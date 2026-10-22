@@ -89,6 +89,11 @@ class Qwen2_5_VL(lmms):
         text_sdpa: bool = False,
         refine: int = 0,
         llm_prune: str = "none",
+        # 2026-10-21 iteration knobs: protected singleton channel + mass-bias
+        # shaping (notes/2026-10-21_experiment_protect-massform.html).
+        protect: float = 0.0,
+        mass_cap: float = 0.0,
+        mass_eff: bool = False,
         # Per-video signal/routing dumps (budgetvid/recording.py). Empty = off.
         dump_dir: str = "",
         **kwargs,
@@ -149,6 +154,7 @@ class Qwen2_5_VL(lmms):
                 lift=lift, gamma_v=gamma_v, lift_norm=lift_norm,
                 mq_alloc=mq_alloc, centroid=centroid, b_max=b_max, mass=mass,
                 text_sdpa=text_sdpa, refine=refine, llm_prune=llm_prune,
+                protect=protect, mass_cap=mass_cap, mass_eff=mass_eff,
                 dump_dir=dump_dir,
                 retention_ratio=retention_ratio,
                 expansion=expansion,
