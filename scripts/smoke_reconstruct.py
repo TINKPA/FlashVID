@@ -53,7 +53,13 @@ def build_inputs(processor, video_path: str, question: str, nframes: int,
 @torch.no_grad()
 def run_pass(model, inputs, max_new_tokens: int):
     """One prefill forward (hidden states) + one greedy generate (answer)."""
-    out = model(**inputs, output_hidden_states=True, use_cache=False)
+    # The patched Qwen2_5_VLModel.forward indexes cache_position at its
+    # compression step and assumes the generate path provided it; a direct
+    # forward hands it None, so build the prefill positions explicitly.
+    cache_position = torch.arange(inputs["input_ids"].shape[1],
+                                  device=inputs["input_ids"].device)
+    out = model(**inputs, cache_position=cache_position,
+                output_hidden_states=True, use_cache=False)
     hs = [h.detach().to("cpu", torch.float32) for h in out.hidden_states]
     del out
     gen = model.generate(**inputs, do_sample=False, max_new_tokens=max_new_tokens)
