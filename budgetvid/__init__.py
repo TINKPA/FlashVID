@@ -179,6 +179,7 @@ def budgetvid(model: nn.Module, policy: str | None = None,
               b_max: int = 0, mass: bool = True, text_sdpa: bool = False,
               refine: int = 0, llm_prune: str = "none",
               protect: float = 0.0, mass_cap: float = 0.0, mass_eff: bool = False,
+              reconstruct: str = "none",
               dump_dir: str = "",
               **flashvid_kwargs) -> nn.Module:
     """Apply BudgetVID to the model.
@@ -213,6 +214,14 @@ def budgetvid(model: nn.Module, policy: str | None = None,
             beta = log(min(m, mass_cap)). True mass is untouched. 0 = off.
         mass_eff (bool, optional): Bias from the purity-weighted effective mass
             instead of the raw group size; true mass is kept for accounting.
+        reconstruct (str, optional): Full-length re-expansion oracle. "group"
+            delivers every original position its group's token at its ORIGINAL
+            position id (exact positions + multiplicity, quantized features);
+            "identity" delivers every position its own feature back (the
+            plumbing check: must match policy "none" bitwise). Forces the mass
+            bias off and keeps the decoder on its loaded backend, so an
+            identity run is comparable to a vanilla run on the same kernels.
+            No speedup -- prefill is full length again. "none" = off.
         text_sdpa (bool, optional): Move the decoder to sdpa even when nothing
             requires it. Implied by ``policy="mq"`` with ``mass=True``; set it
             by hand on a NON-2.0 policy to measure what the backend switch
@@ -249,12 +258,17 @@ def budgetvid(model: nn.Module, policy: str | None = None,
         centroid=centroid, b_max=b_max, mass=mass, refine=refine,
         llm_prune=llm_prune,
         protect=protect, mass_cap=mass_cap, mass_eff=mass_eff,
+        reconstruct=reconstruct,
     )
     # Load the model under flash_attention_2 as usual -- the vision tower
     # demands it -- and move only the decoder to sdpa, which is what can carry
     # the additive log-mass bias. Failing loudly here beats discovering it as a
     # silently unbiased benchmark number.
-    if text_sdpa or (policy in ("mq", "flashvid_mass") and mass):
+    # A reconstruct run never applies the bias (token_mass is forced off in the
+    # pipeline), so the decoder stays on its loaded backend: switching it would
+    # break the bitwise identity-vs-vanilla check the mode exists to support.
+    if text_sdpa or (policy in ("mq", "flashvid_mass") and mass
+                     and reconstruct == "none"):
         n = _text_stack_to_sdpa(model)
         if n == 0:
             raise RuntimeError(

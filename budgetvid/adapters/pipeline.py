@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import torch
 
-from ..core.assembly import assemble
+from ..core.assembly import assemble, reconstruct_full
 from ..core.budget import split_budget
 from ..core.quantize import compress_video, curve_cost
 from ..llm_prune import no_llm_pruning, reset_inner_state  # noqa: F401 (re-export)
@@ -113,6 +113,30 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
     merged = list(zip(out["feats"], out["seed_idx"]))
     tokens, gidx, mass = assemble(video_features, empty, merged=merged,
                                   expected_total=spent, masses=out["mass"])
+
+    recon = str(getattr(cfg, "reconstruct", "none"))
+    if recon != "none":
+        # Full-length re-expansion (oracle rows, see configuration_budgetvid.py).
+        # Emitting arange(L*N_f) as the global indices makes the backbone's
+        # scatter/gather/position filtering the identity: every copy sits at its
+        # member's original position id. The mass channel is forced off because
+        # multiplicity is physical again -- biasing on top would double-count.
+        if str(getattr(cfg, "llm_prune", "none")) != "none":
+            raise ValueError("reconstruct requires llm_prune='none': the inner-LLM "
+                             "stage's visual bookkeeping assumes the compressed span")
+        if recon == "group":
+            full = reconstruct_full(tokens, gidx, out["group_of"])
+        elif recon == "identity":
+            full = video_features.reshape(L * N_f, -1)
+        else:
+            raise KeyError(f"unknown reconstruct '{recon}'; known: none, group, identity")
+        g_full = torch.arange(L * N_f, dtype=torch.long, device=video_features.device)
+        cfg.visual_token_length = L * N_f
+        cfg._bv_kept_g = g_full.detach().clone().cpu()
+        cfg.token_mass = None
+        cfg.token_mass_eff = None
+        return full.to(video_features.dtype), g_full
+
     cfg.visual_token_length = int(tokens.shape[0])
     # Kept for the inner-LLM record (llm_prune.py writes <tag>__llm.npz in this
     # same global indexing); the caller shifts gidx in place afterwards.

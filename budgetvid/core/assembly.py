@@ -100,3 +100,37 @@ def assemble(
     if masses is not None:
         return tokens[order], g[order], torch.cat(mass, 0)[order]
     return tokens[order], g[order]
+
+
+def reconstruct_full(tokens: torch.Tensor, gidx: torch.Tensor,
+                     group_of: torch.Tensor) -> torch.Tensor:
+    """Expand the compressed set back to full length: every original position
+    gets its group's delivered token.
+
+    The inverse direction of ``assemble``: where assemble throws away the
+    members and keeps one token per group, this hands every member position a
+    copy of that token. Positions are exact by construction -- the caller emits
+    the result with ``global_indices = arange(L * N_f)``, so the backbone's
+    position-id filtering degenerates to the identity and every copy sits at
+    its member's ORIGINAL position (M-RoPE included). What stays lost is only
+    the within-group feature residual.
+
+    Args:
+        tokens: [B, D] delivered tokens, sorted by global index (assemble's
+            output order).
+        gidx: [B] their global indices, ascending (assemble's output order).
+        group_of: [L, N_f] for every original token, the global index of the
+            token its group was delivered as (``compress_video``'s map). Every
+            entry must occur in ``gidx``.
+
+    Returns:
+        [L * N_f, D] reconstruction, same dtype as ``tokens``.
+    """
+    flat = group_of.reshape(-1).to(gidx.device)
+    row = torch.searchsorted(gidx, flat)
+    # searchsorted returns an insertion point, which only equals the match when
+    # the value is actually present; a group_of entry pointing at a token that
+    # was never delivered would silently grab its neighbour's feature.
+    if int(row.max()) >= gidx.numel() or not torch.equal(gidx[row], flat):
+        raise AssertionError("group_of names a global index that assemble never delivered")
+    return tokens[row]

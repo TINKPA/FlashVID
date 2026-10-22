@@ -63,6 +63,21 @@ class BudgetVidConfig(FlashVidConfig):
     # log m unchanged; scattered group -> bias decays toward 0. True mass is
     # kept for accounting.
     mass_eff: bool = field(default=False)
+    # --- 2026-10-21 reconstruction oracle (full-length re-expansion) ---
+    # After the usual selection, re-expand to ALL L*N_f positions before the
+    # LLM sees anything: every original position gets a token at its ORIGINAL
+    # position id (the backbone's filtering degenerates to the identity).
+    #   "none"     -> off (the frozen compressed path)
+    #   "group"    -> each position carries its group's delivered token: exact
+    #                 positions + multiplicity, quantized features. The oracle
+    #                 row for what the positional distribution of a group is
+    #                 worth. No speedup -- prefill is full length again.
+    #   "identity" -> each position carries its own ORIGINAL feature: the
+    #                 plumbing check. Must be bitwise identical to policy
+    #                 "none" at every layer; anything else is a bug here.
+    # Mass bias is forced off (multiplicity is physical again); llm_prune must
+    # be "none" (its visual bookkeeping assumes the compressed span).
+    reconstruct: str = field(default="none")
     # Inner-LLM stage for method bv: "none" (one budget, every layer sees B
     # tokens) or "fastv" (FlashVID's second stage, unchanged: at `pruning_layer`
     # keep `llm_retention_ratio` of the visual tokens by last-query attention).
