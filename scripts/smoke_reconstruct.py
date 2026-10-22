@@ -52,19 +52,19 @@ def build_inputs(processor, video_path: str, question: str, nframes: int,
 
 @torch.no_grad()
 def run_pass(model, inputs, max_new_tokens: int):
-    """One prefill forward (hidden states) + one greedy generate (answer)."""
-    # The patched Qwen2_5_VLModel.forward indexes cache_position at its
-    # compression step and assumes the generate path provided it; a direct
-    # forward hands it None, so build the prefill positions explicitly.
-    cache_position = torch.arange(inputs["input_ids"].shape[1],
-                                  device=inputs["input_ids"].device)
-    out = model(**inputs, cache_position=cache_position,
-                output_hidden_states=True, use_cache=False)
-    hs = [h.detach().to("cpu", torch.float32) for h in out.hidden_states]
+    """One greedy generate; layer states come from its PREFILL step.
+
+    The patched forwards assume generate's input preparation (4-row packed
+    position_ids with the text row, cache_position), so a direct forward call
+    is a different program; taking out.hidden_states[0] -- the prefill step's
+    per-layer states -- keeps every pass on exactly the production path.
+    """
+    out = model.generate(**inputs, do_sample=False, max_new_tokens=max_new_tokens,
+                         output_hidden_states=True, return_dict_in_generate=True)
+    hs = [h.detach().to("cpu", torch.float32) for h in out.hidden_states[0]]
+    ans = out.sequences[0, inputs["input_ids"].shape[1]:].cpu()
     del out
-    gen = model.generate(**inputs, do_sample=False, max_new_tokens=max_new_tokens)
-    ans = gen[0, inputs["input_ids"].shape[1]:]
-    return hs, ans.cpu()
+    return hs, ans
 
 
 def set_mode(cfg, policy: str, reconstruct: str):
