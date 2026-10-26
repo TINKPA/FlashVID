@@ -179,7 +179,7 @@ def budgetvid(model: nn.Module, policy: str | None = None,
               b_max: int = 0, mass: bool = True, text_sdpa: bool = False,
               refine: int = 0, llm_prune: str = "none",
               protect: float = 0.0, mass_cap: float = 0.0, mass_eff: bool = False,
-              reconstruct: str = "none",
+              reconstruct: str = "none", recon_rank: int = 0,
               dump_dir: str = "",
               **flashvid_kwargs) -> nn.Module:
     """Apply BudgetVID to the model.
@@ -222,6 +222,10 @@ def budgetvid(model: nn.Module, policy: str | None = None,
             bias off and keeps the decoder on its loaded backend, so an
             identity run is comparable to a vanilla run on the same kernels.
             No speedup -- prefill is full length again. "none" = off.
+        recon_rank (int, optional): With ``reconstruct="group"``, add a rank-r
+            residual code per group (top-r directions of the members' residuals
+            + one coefficient per member per direction) to the reconstruction.
+            0 = counts+positions only; large r converges to "identity".
         text_sdpa (bool, optional): Move the decoder to sdpa even when nothing
             requires it. Implied by ``policy="mq"`` with ``mass=True``; set it
             by hand on a NON-2.0 policy to measure what the backend switch
@@ -258,7 +262,7 @@ def budgetvid(model: nn.Module, policy: str | None = None,
         centroid=centroid, b_max=b_max, mass=mass, refine=refine,
         llm_prune=llm_prune,
         protect=protect, mass_cap=mass_cap, mass_eff=mass_eff,
-        reconstruct=reconstruct,
+        reconstruct=reconstruct, recon_rank=recon_rank,
     )
     # Load the model under flash_attention_2 as usual -- the vision tower
     # demands it -- and move only the decoder to sdpa, which is what can carry

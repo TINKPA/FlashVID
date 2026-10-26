@@ -18,7 +18,8 @@ import torch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from budgetvid.adapters.pipeline import budgetvid_pipeline       # noqa: E402
-from budgetvid.core.assembly import assemble, reconstruct_full   # noqa: E402
+from budgetvid.core.assembly import (assemble, reconstruct_full,  # noqa: E402
+                                     reconstruct_rank)
 from budgetvid.core.quantize import compress_video               # noqa: E402
 
 PASS, FAIL = [], []
@@ -102,6 +103,30 @@ def main():
     toks_off, g_off = budgetvid_pipeline(x, attn, c_off)
     check("12 reconstruct='none' is the frozen compressed path",
           toks_off.shape[0] == B and c_off.token_mass is not None)
+
+    # ---- the rank ladder (mass-as-vector residual codes) --------------------
+    xf = x.reshape(L * N_f, -1).float()
+    err0 = (reconstruct_rank(tokens, gidx, out["group_of"], x, 0) - xf).norm()
+    errs = [float(err0)]
+    for r in (1, 2, 4, N_f):
+        er = float((reconstruct_rank(tokens, gidx, out["group_of"], x, r) - xf).norm())
+        errs.append(er)
+    check("13 rank=0 equals reconstruct_full",
+          torch.allclose(reconstruct_rank(tokens, gidx, out["group_of"], x, 0), full.float()))
+    check("14 residual error is non-increasing in rank",
+          all(errs[i] >= errs[i + 1] - 1e-4 for i in range(len(errs) - 1)),
+          str([round(e, 3) for e in errs]))
+    check("15 full rank reconstructs the original tokens",
+          errs[-1] < 1e-3 * float(xf.norm()), f"err {errs[-1]:.2e}")
+    check("16 rank 1 strictly beats rank 0 on random data",
+          errs[1] < errs[0])
+
+    c_r = cfg(reconstruct="group", recon_rank=2)
+    toks_r, g_r = budgetvid_pipeline(x, attn, c_r)
+    check("17 pipeline rank mode: full length, closer to the original than rank 0",
+          toks_r.shape[0] == L * N_f and torch.equal(g_r, torch.arange(L * N_f))
+          and float((toks_r.float() - xf).norm()) < errs[0])
+    check("18 pipeline rank mode forces the mass channel off", c_r.token_mass is None)
 
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

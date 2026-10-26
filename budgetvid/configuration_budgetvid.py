@@ -78,6 +78,12 @@ class BudgetVidConfig(FlashVidConfig):
     # Mass bias is forced off (multiplicity is physical again); llm_prune must
     # be "none" (its visual bookkeeping assumes the compressed span).
     reconstruct: str = field(default="none")
+    # Mass-as-vector ladder on top of reconstruct="group": each group records
+    # the top-r principal directions of its members' residuals against the
+    # delivered token plus one coefficient per member per direction, and the
+    # reconstruction adds that rank-r residual back. 0 = counts+positions only
+    # (the frozen "group" oracle); large r converges to "identity"/vanilla.
+    recon_rank: int = field(default=0)
     # Inner-LLM stage for method bv: "none" (one budget, every layer sees B
     # tokens) or "fastv" (FlashVID's second stage, unchanged: at `pruning_layer`
     # keep `llm_retention_ratio` of the visual tokens by last-query attention).

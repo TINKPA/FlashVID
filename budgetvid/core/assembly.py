@@ -134,3 +134,51 @@ def reconstruct_full(tokens: torch.Tensor, gidx: torch.Tensor,
     if int(row.max()) >= gidx.numel() or not torch.equal(gidx[row], flat):
         raise AssertionError("group_of names a global index that assemble never delivered")
     return tokens[row]
+
+
+def reconstruct_rank(tokens: torch.Tensor, gidx: torch.Tensor,
+                     group_of: torch.Tensor, x: torch.Tensor,
+                     rank: int) -> torch.Tensor:
+    """Full-length reconstruction with a rank-``rank`` residual code per group.
+
+    The mass-as-vector ladder: each group additionally records the top-``rank``
+    principal directions of its members' residuals against the delivered token
+    (the "angles" of the member set) and one coefficient per member per
+    direction. Reconstruction is ``x̂_i = delivered_j + sum_t a_{i,t} u_{j,t}``.
+
+    rank=0 is exactly ``reconstruct_full`` (count + positions only). As rank
+    reaches each group's member count the residual matrix is represented
+    exactly and the reconstruction converges to the original tokens, so the
+    two ends of the ladder coincide with the group / identity oracles.
+
+    Args:
+        tokens: [B, D] delivered tokens, sorted by global index.
+        gidx: [B] their global indices, ascending.
+        group_of: [L, N_f] member -> delivered-token global index.
+        x: [L, N_f, D] the ORIGINAL tokens (delivery space).
+        rank: residual directions kept per group; 0 = none.
+
+    Returns:
+        [L * N_f, D] reconstruction, float32.
+    """
+    full = reconstruct_full(tokens, gidx, group_of).float().clone()
+    if rank <= 0:
+        return full
+    flat_g = group_of.reshape(-1)
+    xf = x.reshape(-1, x.shape[-1]).float()
+    resid = xf - full
+    for g in gidx.tolist():
+        mem = torch.nonzero(flat_g == g).flatten()
+        if mem.numel() < 2:
+            # a singleton's residual is 0 by construction (identity delivery)
+            # or a single vector: rank-1 represents it exactly either way.
+            full[mem] = xf[mem]
+            continue
+        R = resid[mem]                                    # [m, D]
+        r = min(rank, R.shape[0])
+        # Top-r right singular vectors of the residual matrix; lowrank SVD has
+        # RNG inside, and determinism is load-bearing here, so use full SVD.
+        _, _, Vh = torch.linalg.svd(R, full_matrices=False)
+        U = Vh[:r]                                        # [r, D] directions
+        full[mem] = full[mem] + (R @ U.t()) @ U           # project + add back
+    return full

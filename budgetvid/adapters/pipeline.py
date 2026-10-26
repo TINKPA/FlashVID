@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import torch
 
-from ..core.assembly import assemble, reconstruct_full
+from ..core.assembly import assemble, reconstruct_full, reconstruct_rank
 from ..core.budget import split_budget
 from ..core.quantize import compress_video, curve_cost
 from ..llm_prune import no_llm_pruning, reset_inner_state  # noqa: F401 (re-export)
@@ -125,7 +125,9 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
             raise ValueError("reconstruct requires llm_prune='none': the inner-LLM "
                              "stage's visual bookkeeping assumes the compressed span")
         if recon == "group":
-            full = reconstruct_full(tokens, gidx, out["group_of"])
+            rr = int(getattr(cfg, "recon_rank", 0))
+            full = (reconstruct_rank(tokens, gidx, out["group_of"], video_features, rr)
+                    if rr > 0 else reconstruct_full(tokens, gidx, out["group_of"]))
         elif recon == "identity":
             full = video_features.reshape(L * N_f, -1)
         else:

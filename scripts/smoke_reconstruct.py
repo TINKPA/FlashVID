@@ -67,9 +67,10 @@ def run_pass(model, inputs, max_new_tokens: int):
     return hs, ans
 
 
-def set_mode(cfg, policy: str, reconstruct: str):
+def set_mode(cfg, policy: str, reconstruct: str, recon_rank: int = 0):
     cfg.policy = policy
     cfg.reconstruct = reconstruct
+    cfg.recon_rank = recon_rank
 
 
 def main():
@@ -100,9 +101,12 @@ def main():
     processor = AutoProcessor.from_pretrained(args.pretrained)
     tok = processor.tokenizer
 
-    modes = [("A_vanilla", "none", "none"),
-             ("B_identity", "mq", "identity"),
-             ("C_group", "mq", "group")]
+    modes = [("A_vanilla", "none", "none", 0),
+             ("B_identity", "mq", "identity", 0),
+             ("C_group_r0", "mq", "group", 0),
+             ("D_group_r1", "mq", "group", 1),
+             ("E_group_r4", "mq", "group", 4),
+             ("F_group_r16", "mq", "group", 16)]
     results = []
     for qi, q in enumerate(questions):
         video = str(data_dir / q["video"])
@@ -112,8 +116,8 @@ def main():
                "expected": q.get("answer"), "seq_len": int(inputs["input_ids"].shape[1]),
                "modes": {}, "layer_maxdiff": {}}
         hs_ref = None
-        for name, policy, recon in modes:
-            set_mode(cfg, policy, recon)
+        for name, policy, recon, rr in modes:
+            set_mode(cfg, policy, recon, rr)
             hs, ans = run_pass(model, inputs, args.max_new_tokens)
             text = tok.decode(ans, skip_special_tokens=True)
             rec["modes"][name] = {"answer": text,
@@ -134,15 +138,14 @@ def main():
 
         b = rec["layer_maxdiff"].get("B_identity")
         b_exact = isinstance(b, list) and max(b) == 0.0
-        c = rec["layer_maxdiff"].get("C_group")
         rec["identity_bitwise"] = bool(b_exact)
+        ladder = {n: v[-1] if isinstance(v, list) else v
+                  for n, v in rec["layer_maxdiff"].items() if n != "B_identity"}
         print(f"[{qi}] {q['video']}  seq={rec['seq_len']}  "
-              f"B identity max|d| over layers = "
-              f"{(max(b) if isinstance(b, list) else b)}  "
-              f"C group last-layer max|d| = "
-              f"{(c[-1] if isinstance(c, list) else c)}", flush=True)
-        for name, _, _ in modes:
-            print(f"      {name:11s} -> {rec['modes'][name]['answer']!r}", flush=True)
+              f"identity max|d| = {(max(b) if isinstance(b, list) else b)}  "
+              f"last-layer max|d| by rank: {ladder}", flush=True)
+        for name, *_ in modes:
+            print(f"      {name:12s} -> {rec['modes'][name]['answer']!r}", flush=True)
         results.append(rec)
 
     n_exact = sum(r["identity_bitwise"] for r in results)
