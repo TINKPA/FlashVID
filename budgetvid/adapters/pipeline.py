@@ -11,23 +11,29 @@ Note this differs from FlashVID's own `retention_ratio`, which is a per-LLM-laye
 average and lands ~30% higher in actual visual tokens at the LLM input
 (experiments/flashvid_token_accounting). Do not read the two as the same knob.
 
-The Round-1 policies (score -> route -> merge; uniform / random_drop / attn_top
-baselines) were removed on 2026-10-07; every run that used them records its
-commit, and 89c59fe is the last one that carries them.
+The Round-1 policies (score -> route -> merge; attn_top baselines) were removed
+on 2026-10-07; every run that used them records its commit, and 89c59fe is the
+last one that carries them. The two score-free floors, ``"uniform"`` (a fixed
+spatial grid) and ``"random_drop"`` (per-video seeded random positions), came
+back on 2026-10-27 for the baselines x frames grid; both keep exactly
+round(r*N) tokens, split evenly over frames, and carry no mass.
 """
 
 from __future__ import annotations
+
+import hashlib
 
 import torch
 
 from ..core.assembly import assemble
 from ..core.budget import split_budget
+from ..core.policies import random_drop_keep, uniform_keep
 from ..core.quantize import compress_video, curve_cost
 from ..llm_prune import no_llm_pruning, reset_inner_state  # noqa: F401 (re-export)
 from ..mass_bias import clear_mass
 from ..recording import dump_record, frame_stats, make_tag
 
-POLICIES = ("none", "mq")
+POLICIES = ("none", "mq", "uniform", "random_drop")
 
 
 def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor,
@@ -61,8 +67,50 @@ def budgetvid_pipeline(video_features: torch.Tensor, cls_attention: torch.Tensor
     r = float(flashvid_config.retention_ratio)
     B = int(round(r * L * N_f))
     b_t = split_budget(B, L, N_f).to(device)
+    if policy in ("uniform", "random_drop"):
+        return _floor_keep(video_features, cls_attention, flashvid_config,
+                           policy, b_t, B, r, L, N_f)
     return _measure_quantization(video_features, cls_attention, flashvid_config,
                                  b_t, B, L, N_f)
+
+
+def _derived_seed(base_seed: int, tag: str) -> int:
+    """Per-video seed for ``random_drop``: reproducible, yet independent across
+    videos (one global seed would apply the same mask to every video)."""
+    return int(hashlib.sha256(f"{base_seed}:{tag}".encode()).hexdigest()[:8], 16)
+
+
+def _floor_keep(video_features, cls_attention, cfg, policy, b_t, B, r, L, N_f):
+    """The score-free floors: keep ``b_t[t]`` original tokens per frame, no merge,
+    no mass. The decoder stays on its loaded backend (no bias to carry), so these
+    rows share the vanilla and FlashVID rows' attention implementation."""
+    device = video_features.device
+    seed = int(getattr(cfg, "seed", 42))
+    meta = {}
+    if policy == "uniform":
+        keep = uniform_keep(L, N_f, b_t, device=device)
+    else:
+        tag = str(getattr(cfg, "dump_tag", "") or "")
+        if tag:
+            meta = {"seed_base": seed, "seed_tag": tag}
+            seed = _derived_seed(seed, tag)
+        keep = random_drop_keep(L, N_f, b_t, seed=seed, device=device)
+    for t, k in enumerate(keep):
+        assert k.numel() == int(b_t[t]), (t, k.numel(), int(b_t[t]))
+    tokens, g = assemble(video_features, keep, merged=None, expected_total=B)
+    cfg.visual_token_length = int(tokens.shape[0])
+    cfg._bv_kept_g = g.detach().clone().cpu()
+    cfg.token_mass = None
+    cfg.token_mass_eff = None
+    dump_dir = str(getattr(cfg, "dump_dir", "") or "")
+    if dump_dir:
+        dump_record(dump_dir, make_tag(cfg), {"I_raw": cls_attention},
+                    {"kept_g": g, "b_t": b_t},
+                    {"method": "bv", "policy": policy, "L": L, "N_f": N_f,
+                     "retention_ratio": r, "B": B, "B_spent": int(tokens.shape[0]),
+                     "seed": seed, **meta},
+                    frame_stats(cls_attention), cfg=cfg)
+    return tokens, g
 
 
 def _lift_params(cfg, device, dtype):
