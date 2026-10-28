@@ -113,7 +113,7 @@ def main():
         inputs = build_inputs(processor, video, q["question"], args.nframes,
                               args.max_pixels, model.device)
         rec = {"video": q["video"], "question": q["question"][:120],
-               "expected": q.get("answer"), "seq_len": int(inputs["input_ids"].shape[1]),
+               "expected": q.get("answer"),
                "modes": {}, "layer_maxdiff": {}}
         hs_ref = None
         for name, policy, recon, rr in modes:
@@ -121,9 +121,7 @@ def main():
             hs, ans = run_pass(model, inputs, args.max_new_tokens)
             text = tok.decode(ans, skip_special_tokens=True)
             rec["modes"][name] = {"answer": text,
-                                  "n_layers": len(hs),
-                                  "seq_len_lm": int(hs[0].shape[1]),
-                                  "visual_token_length": int(cfg.visual_token_length)}
+                                  "n_layers": len(hs)}
             if name == "A_vanilla":
                 hs_ref = hs
             else:
@@ -141,7 +139,7 @@ def main():
         rec["identity_bitwise"] = bool(b_exact)
         ladder = {n: v[-1] if isinstance(v, list) else v
                   for n, v in rec["layer_maxdiff"].items() if n != "B_identity"}
-        print(f"[{qi}] {q['video']}  seq={rec['seq_len']}  "
+        print(f"[{qi}] {q['video']}  "
               f"identity max|d| = {(max(b) if isinstance(b, list) else b)}  "
               f"last-layer max|d| by rank: {ladder}", flush=True)
         for name, *_ in modes:

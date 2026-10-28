@@ -59,7 +59,6 @@ def apply_mass_bias(causal_mask, hidden_states, cache_position, flashvid_config,
     if m is None:
         return causal_mask
 
-    start = int(getattr(flashvid_config, "visual_token_start_index", 0))
     n_vis = int(m.numel())
     dtype, device = hidden_states.dtype, hidden_states.device
     bsz, q_len = hidden_states.shape[0], hidden_states.shape[1]
@@ -95,21 +94,6 @@ def apply_mass_bias(causal_mask, hidden_states, cache_position, flashvid_config,
 
     beta = bias_mass(flashvid_config).to(device=device).to(dtype)
     mask[..., pos] += beta
-    if not getattr(flashvid_config, "_mass_logged", False):
-        # Once per process. The bias landing on the wrong slice, or not landing
-        # at all, is the failure mode that produces a plausible number instead
-        # of an error, so the span and the mass range go in the run log.
-        flashvid_config._mass_logged = True
-        contiguous = bool(n_vis == 0 or int(pos[-1]) - int(pos[0]) + 1 == n_vis)
-        cap = float(getattr(flashvid_config, "mass_cap", 0.0) or 0.0)
-        eff = getattr(flashvid_config, "token_mass_eff", None) is not None
-        print(f"[BV] log-mass bias live: {n_vis} keys in [{int(pos[0]) if n_vis else start}, "
-              f"{int(pos[-1]) + 1 if n_vis else start}) ({'contiguous' if contiguous else 'interleaved'}) of {kv_len} "
-              f"(q_len {q_len}), "
-              f"m in [{int(m.min())}, {int(m.max())}], beta max {float(beta.max()):.2f}"
-              + (f", mass_cap {cap:g}" if cap > 0 else "")
-              + (", effective mass" if eff else ""),
-              flush=True)
     return mask
 
 
