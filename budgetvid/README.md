@@ -12,12 +12,11 @@ used it records its commit.
 | Path | What it is |
 |---|---|
 | `core/quantize.py` | Metric lift, FPS cost curves, water-filling, MPQ, Lloyd refine, medoid delivery, video-level coreset. |
-| `core/assembly.py`, `core/budget.py` | Assemble the compressed sequence (with masses); even split used by the `even` ablation and the dumps. |
+| `core/assembly.py`, `core/budget.py` | Assemble the compressed sequence (with masses); even split used by the `even` ablation. |
 | `mass_bias.py` | `beta = log m` as an additive attention-score bias. |
 | `adapters/pipeline.py` | Method `bv`: `policy=none` (vanilla) or `policy=mq`. |
 | `llm_prune.py` | Method `bv`'s inner-LLM stage: `llm_prune=none` (default, no-op) or `fastv` (FlashVID's FastV with the mass vector carried through); the score bias around it. |
 | `flashvid_mass.py` | Method `fvmass`: FlashVID's own compression + FastV pruning, with the mass channel (`policy=flashvid_mass`). |
-| `recording.py` | Per-video dumps (`dump_dir=`). |
 | `configuration_budgetvid.py` | `FlashVidConfig` plus every knob below. |
 | `__init__.py` | The `budgetvid()` wrapper and dispatch registration. |
 

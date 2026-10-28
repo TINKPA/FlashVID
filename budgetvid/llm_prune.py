@@ -40,7 +40,6 @@ def reset_inner_state(flashvid_config) -> None:
     """Forget the previous video's inner-LLM record. Called by every compression entry."""
     flashvid_config.inner_pruned = False
     flashvid_config._bv_llm_keep = None
-    flashvid_config._bv_kept_g = None
 
 
 def no_llm_pruning(hidden_states, causal_mask, attentions, cache_position,
@@ -127,35 +126,8 @@ def bv_llm_pruning(hidden_states, causal_mask, attentions, cache_position,
               + (f" (layer {flashvid_config.pruning_layer}, keep "
                  f"{flashvid_config.llm_retention_ratio} of the visual tokens)" if mode == "fastv" else ""),
               flush=True)
-    n_in = int(getattr(flashvid_config, "visual_token_length", 0))
-    out = fn(hidden_states, causal_mask, attentions, cache_position, position_ids,
+    return fn(hidden_states, causal_mask, attentions, cache_position, position_ids,
              position_embeddings, flashvid_config, visual_pos_masks=visual_pos_masks)
-    dump_dir = str(getattr(flashvid_config, "dump_dir", "") or "")
-    if mode == "fastv" and dump_dir:
-        _record_inner_keep(dump_dir, flashvid_config, n_in)
-    return out
-
-
-def _record_inner_keep(dump_dir, cfg, n_in) -> None:
-    """Sibling ``<tag>__llm.npz``: which vision-kept tokens survived FastV, as
-    ``kept_llm_g`` in the same global indexing as the compression record's
-    ``kept_g`` (mirrors recording.wrap_flashvid_keep for FlashVID)."""
-    from .recording import dump_record, make_tag
-
-    g = getattr(cfg, "_bv_kept_g", None)
-    ranks = getattr(cfg, "_bv_llm_keep", None)
-    if g is None or ranks is None:
-        return
-    cfg._bv_kept_g = None                        # first prefill only
-    meta = {"method": "bv", "stage": "inner_llm", "llm_prune": "fastv",
-            "pruning_layer": int(getattr(cfg, "pruning_layer", -1)),
-            "llm_retention_ratio": float(getattr(cfg, "llm_retention_ratio", -1.0)),
-            "n_visual_in": n_in, "n_visual_kept": int(ranks.numel())}
-    if g.numel() == n_in:
-        dump_record(dump_dir, make_tag(cfg) + "__llm", {}, {"kept_llm_g": g[ranks]}, meta, None, cfg=cfg)
-    else:
-        dump_record(dump_dir, make_tag(cfg) + "__llm", {}, {},
-                    {**meta, "error": f"kept_g has {g.numel()} tokens, LLM saw {n_in}"}, None, cfg=cfg)
 
 
 def mass_score_bias(causal_mask, hidden_states, cache_position, flashvid_config, past_key_values=None):

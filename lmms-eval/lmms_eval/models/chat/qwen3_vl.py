@@ -67,35 +67,6 @@ class Qwen3_VL(Qwen3_VLSimple):
             videos = self.flatten(videos)
             gen_kwargs = all_gen_kwargs[0]
 
-            # Tag the upcoming compression dump with the video's filename stem
-            # so npz records join back to questions (one npz per video, not per
-            # question). Round-1 defect: `--model qwen3_vl` resolves HERE (chat
-            # registry wins over simple), and the tag-setting code lived only in
-            # the simple parent's generate_until -- overridden by this method,
-            # so it never ran and every dump fell back to sample_<pid>_<ns>
-            # names (308 per-question files instead of 102 per-video). The
-            # config reference is stashed by __init__ (self._bv_cfg) before
-            # accelerate touches the model. Only unambiguous with one video per
-            # chunk (batch_size=1, our campaigns); otherwise leave the fallback.
-            if len(videos) == 1 and isinstance(videos[0], str):
-                _cfg = getattr(self, "_bv_cfg", None)
-                if _cfg is None and hasattr(self._model, "modules"):
-                    for _m in self._model.modules():
-                        _cfg = getattr(_m, "flashvid_config", None)
-                        if _cfg is not None:
-                            break
-                if os.environ.get("BV_DEBUG_TAG"):
-                    print(
-                        f"[BV_DEBUG_TAG] chat rank={self._rank} "
-                        f"model={type(self._model).__name__} "
-                        f"stashed={getattr(self, '_bv_cfg', None) is not None} "
-                        f"resolved={_cfg is not None} "
-                        f"video={os.path.basename(videos[0])}",
-                        flush=True,
-                    )
-                if _cfg is not None:
-                    _cfg.dump_tag = os.path.splitext(os.path.basename(videos[0]))[0]
-
             # Apply chat template
             video_kwargs = {
                 "max_pixels": self.max_pixels,
@@ -110,8 +81,7 @@ class Qwen3_VL(Qwen3_VLSimple):
                 # to even (qwen_vl_utils' FRAME_FACTOR). Ported from chat/qwen2_5_vl.py on
                 # 2026-10-20: without it qwen_vl_utils raises "nframes should in interval
                 # [2, 30], but got 32" on MVBench's ~30-frame TVQA clips (3 fps) and the whole
-                # run dies at that clip (CARC job 13276631, every row). Also records which
-                # source frames the model saw for the compression dump, as the Qwen2.5 path does.
+                # run dies at that clip (CARC job 13276631, every row).
                 if videos and decord is not None:
                     try:
                         video_path = videos[0]  # batch size 1 for videos
@@ -121,15 +91,6 @@ class Qwen3_VL(Qwen3_VLSimple):
                         nframes = (nframes // 2) * 2
                         nframes = max(2, nframes)
                         video_kwargs["nframes"] = nframes
-                        if _cfg is not None:
-                            _cfg.dump_frames = {
-                                "source_frames": int(video_total_frames),
-                                "source_fps": float(vr.get_avg_fps()),
-                                "nframes": int(nframes),
-                                "indices": torch.linspace(0, video_total_frames - 1, nframes)
-                                                .round().long().tolist(),
-                                "index_rule": "qwen_vl_utils: linspace(0, total-1, nframes).round()",
-                            }
                     except Exception as e:
                         eval_logger.warning(f"Failed to probe video {videos[0]}: {e}, using default nframes")
                         video_kwargs["nframes"] = self.max_num_frames

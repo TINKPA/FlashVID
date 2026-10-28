@@ -33,7 +33,7 @@ def check(name, cond, detail=""):
 def cfg(**kw):
     base = dict(policy="mq", retention_ratio=0.25, lift="none", gamma_v=1.0,
                 lift_norm=True, mq_alloc="waterfill", centroid="rms", b_max=0,
-                mass=True, dump_dir="", visual_token_start_index=0,
+                mass=True, visual_token_start_index=0,
                 visual_token_length=0, token_mass=None, reconstruct="none")
     base.update(kw)
     return types.SimpleNamespace(**base)

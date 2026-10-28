@@ -180,7 +180,6 @@ def budgetvid(model: nn.Module, policy: str | None = None,
               refine: int = 0, llm_prune: str = "none",
               protect: float = 0.0, mass_cap: float = 0.0, mass_eff: bool = False,
               reconstruct: str = "none", recon_rank: int = 0,
-              dump_dir: str = "",
               **flashvid_kwargs) -> nn.Module:
     """Apply BudgetVID to the model.
 
@@ -231,9 +230,6 @@ def budgetvid(model: nn.Module, policy: str | None = None,
             by hand on a NON-2.0 policy to measure what the backend switch
             alone costs, which is the only way a 2.0 row can be compared to an
             older flash_attention_2 row with a number rather than a hope.
-        dump_dir (str, optional): When set, every compressed video's signals
-            and routing decisions are dumped there (budgetvid/recording.py).
-            The eval wrapper sets ``dump_tag`` on the config per sample.
         **flashvid_kwargs: Forwarded verbatim to ``flashvid()``
             (``retention_ratio``, ``alpha``, ``temporal_threshold``, ...).
 
@@ -257,7 +253,6 @@ def budgetvid(model: nn.Module, policy: str | None = None,
     config = BudgetVidConfig(
         **asdict(model.flashvid_config),
         policy=policy or "none",
-        dump_dir=dump_dir,
         lift=lift, gamma_v=gamma_v, lift_norm=lift_norm, mq_alloc=mq_alloc,
         centroid=centroid, b_max=b_max, mass=mass, refine=refine,
         llm_prune=llm_prune,

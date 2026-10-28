@@ -117,8 +117,6 @@ class Llava_OneVision(lmms):
         text_sdpa: bool = False,
         refine: int = 0,
         llm_prune: str = "none",
-        # Per-video signal/routing dumps (budgetvid/recording.py). Empty = off.
-        dump_dir: str = "",
         **kwargs,
     ) -> None:
         super().__init__()
@@ -183,12 +181,6 @@ class Llava_OneVision(lmms):
 
         # ! Enable FlashVID
         assert not (enable_flashvid and enable_budgetvid), "enable_flashvid and enable_budgetvid are mutually exclusive; enable one at a time."
-        if dump_dir and enable_flashvid:
-            # Record FlashVID's own kept indices so case analysis can compare
-            # selections across methods (registry shim; no upstream edits).
-            from budgetvid.recording import wrap_flashvid_keep
-
-            wrap_flashvid_keep(dump_dir)
         if enable_budgetvid:
             from budgetvid import budgetvid
 
@@ -198,7 +190,6 @@ class Llava_OneVision(lmms):
                 lift=lift, gamma_v=gamma_v, lift_norm=lift_norm,
                 mq_alloc=mq_alloc, centroid=centroid, b_max=b_max, mass=mass,
                 text_sdpa=text_sdpa, refine=refine, llm_prune=llm_prune,
-                dump_dir=dump_dir,
                 retention_ratio=retention_ratio,
                 expansion=expansion,
                 do_segment=do_segment,
@@ -574,14 +565,10 @@ class Llava_OneVision(lmms):
                         placeholder_count = len(visual) if isinstance(visual, list) else 1
 
                     elif type(visual[0]) == str:  # For video task
-                        # Tag the upcoming compression dump with the video's
-                        # filename stem so npz records join back to questions.
                         _cfg = getattr(self._model, "flashvid_config", None)
                         if _cfg is None:  # DDP-wrapped model hides it in .module
                             _cfg = getattr(getattr(self._model, "module", None),
                                            "flashvid_config", None)
-                        if _cfg is not None:
-                            _cfg.dump_tag = os.path.splitext(os.path.basename(visual[0]))[0]
                         image_tensor = []
                         try:
                             if self.video_decode_backend == "decord":

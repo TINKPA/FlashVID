@@ -34,7 +34,7 @@ def cfg(**kw):
     """A stand-in for BudgetVidConfig: the pipeline only ever getattr's."""
     base = dict(policy="mq", retention_ratio=0.25, lift="none", gamma_v=1.0,
                 lift_norm=True, mq_alloc="waterfill", centroid="rms", b_max=0,
-                mass=True, dump_dir="", seed=42, visual_token_start_index=0,
+                mass=True, seed=42, visual_token_start_index=0,
                 visual_token_length=0, token_mass=None)
     base.update(kw)
     return types.SimpleNamespace(**base)
@@ -152,29 +152,6 @@ def main():
     except ValueError:
         ok = True
     check("13 a mass vector that overruns the sequence raises", ok)
-
-    # ---- 14: the dump carries what analysis needs to place tokens ---------
-    import json
-    import tempfile
-    import numpy as np
-    frames = {"source_frames": 300, "source_fps": 30.0, "nframes": 2 * L,
-              "indices": list(range(0, 2 * L * 10, 10)), "index_rule": "test"}
-    for alloc in ("waterfill", "video"):
-        with tempfile.TemporaryDirectory() as tmp:
-            cd = cfg(dump_dir=tmp, dump_tag="vid", mq_alloc=alloc, H=4, W=4,
-                     dump_frames=frames)
-            _, gd = budgetvid_pipeline(x, attn, cd)
-            z = np.load(pathlib.Path(tmp) / "vid.npz")
-            meta = json.loads(str(z["meta"]))
-            go = z["group_of"]
-            counts = np.bincount(go.ravel(), minlength=L * N_f)
-            mm = z["mass_map"].ravel()
-            check(f"14 {alloc}: group_of [L, N_f] points at kept tokens",
-                  go.shape == (L, N_f) and set(go.ravel().tolist()) == set(gd.tolist()))
-            check(f"14 {alloc}: group sizes in group_of equal mass_map",
-                  bool((counts[gd.numpy()] == mm[gd.numpy()]).all()))
-            check(f"14 {alloc}: meta has grid_hw and the sampled frames",
-                  meta.get("grid_hw") == [4, 4] and meta.get("frames") == frames, str(meta)[:200])
 
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

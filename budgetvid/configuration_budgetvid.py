@@ -94,8 +94,3 @@ class BudgetVidConfig(FlashVidConfig):
     # LANGUAGE model actually used (the vision tower stays on FA2 either way).
     attn_text: str = field(default="")
 
-
-    # Per-video signal/routing dumps (budgetvid/recording.py). Empty = off.
-    # The per-sample tag is set by the eval wrapper (`dump_tag`, a transient
-    # attribute, deliberately not a dataclass field: it changes every sample).
-    dump_dir: str = field(default="")

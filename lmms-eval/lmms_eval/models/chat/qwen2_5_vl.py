@@ -66,30 +66,6 @@ class Qwen2_5_VL(Qwen2_5_VLSimple):
             videos = self.flatten(videos)
             gen_kwargs = all_gen_kwargs[0]
 
-            # Tag the upcoming compression dump with the video's filename stem,
-            # so npz records join back to questions (one npz per video, not one
-            # per question). Ported from chat/qwen3_vl.py, where the same defect
-            # was found in Round 1: `--model qwen2_5_vl` resolves HERE, and the
-            # tag-setting code lives in the simple parent's generate_until,
-            # which this method overrides. Only unambiguous at batch_size=1.
-            _cfg = None
-            if len(videos) == 1 and isinstance(videos[0], str):
-                _cfg = getattr(self, "_bv_cfg", None)
-                if _cfg is None and hasattr(self._model, "modules"):
-                    for _m in self._model.modules():
-                        _cfg = getattr(_m, "flashvid_config", None)
-                        if _cfg is not None:
-                            break
-                if os.environ.get("BV_DEBUG_TAG"):
-                    print(f"[BV_DEBUG_TAG] chat rank={self._rank} "
-                          f"model={type(self._model).__name__} "
-                          f"stashed={getattr(self, '_bv_cfg', None) is not None} "
-                          f"resolved={_cfg is not None} "
-                          f"video={os.path.basename(videos[0])}", flush=True)
-                if _cfg is not None:
-                    _cfg.dump_tag = os.path.splitext(os.path.basename(videos[0]))[0]
-                    _cfg.dump_frames = None   # never carry the previous video's frames
-
             # Apply chat template
             video_kwargs = {
                 "max_pixels": self.max_pixels,
@@ -112,19 +88,6 @@ class Qwen2_5_VL(Qwen2_5_VLSimple):
                         nframes = (nframes // 2) * 2  # Floor to nearest even number
                         nframes = max(2, nframes)  # At least 2 frames
                         video_kwargs["nframes"] = nframes
-                        # Which source frames the model saw, for the compression
-                        # dump (budgetvid/recording.py:context_meta). The rule is
-                        # qwen_vl_utils' own for a given nframes; checked against
-                        # the installed version in the dump smoke test.
-                        if _cfg is not None:
-                            _cfg.dump_frames = {
-                                "source_frames": int(video_total_frames),
-                                "source_fps": float(vr.get_avg_fps()),
-                                "nframes": int(nframes),
-                                "indices": torch.linspace(0, video_total_frames - 1, nframes)
-                                                .round().long().tolist(),
-                                "index_rule": "qwen_vl_utils: linspace(0, total-1, nframes).round()",
-                            }
                     except Exception as e:
                         eval_logger.warning(f"Failed to probe video {videos[0]}: {e}, using default nframes")
                         video_kwargs["nframes"] = self.max_num_frames

@@ -22,10 +22,9 @@ import torch
 
 from ..core.assembly import assemble, reconstruct_full, reconstruct_rank
 from ..core.budget import split_budget
-from ..core.quantize import compress_video, curve_cost
+from ..core.quantize import compress_video
 from ..llm_prune import no_llm_pruning, reset_inner_state  # noqa: F401 (re-export)
 from ..mass_bias import clear_mass
-from ..recording import dump_record, frame_stats, make_tag
 
 POLICIES = ("none", "mq")
 
@@ -134,15 +133,11 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
             raise KeyError(f"unknown reconstruct '{recon}'; known: none, group, identity")
         g_full = torch.arange(L * N_f, dtype=torch.long, device=video_features.device)
         cfg.visual_token_length = L * N_f
-        cfg._bv_kept_g = g_full.detach().clone().cpu()
         cfg.token_mass = None
         cfg.token_mass_eff = None
         return full.to(video_features.dtype), g_full
 
     cfg.visual_token_length = int(tokens.shape[0])
-    # Kept for the inner-LLM record (llm_prune.py writes <tag>__llm.npz in this
-    # same global indexing); the caller shifts gidx in place afterwards.
-    cfg._bv_kept_g = gidx.detach().clone().cpu()
     # The mass channel. Off is the mandatory ablation (a conventional
     # mass-destroying merge), and it must travel this same code path so the two
     # rows differ in one thing only.
@@ -158,58 +153,5 @@ def _measure_quantization(video_features, cls_attention, cfg, b_t, B, L, N_f):
             raise AssertionError("mass_eff ordering diverged from assemble()'s")
         cfg.token_mass_eff = torch.cat(out["mass_eff"], 0)[order]
 
-    dump_dir = str(getattr(cfg, "dump_dir", "") or "")
-    if dump_dir:
-        # The counterfactual allocation costs nothing to evaluate: D_t(b) is the
-        # realized cost at every size, so the allocation we did NOT take is a
-        # lookup on curves we already have. This is what answers P2 of the
-        # offline-replay note (does water-filling beat the even split on
-        # quantization cost, and by how much) as a by-product of the run itself.
-        alloc = str(getattr(cfg, "mq_alloc", "waterfill"))
-        if alloc == "video" or "protected" in out:
-            # video: one video-level curve, no per-frame allocation to price.
-            # protect: out["b"] counts delivered tokens (protected included), so
-            # it no longer indexes the open-seed curves; the counterfactual is
-            # not comparable and is skipped rather than silently mispriced.
-            cost_even = cost_wf = out["cost"]
-        else:
-            b_alt = split_budget(B, L, N_f).to(out["b"].device) \
-                if alloc == "waterfill" else out["b"]
-            cost_even = curve_cost(out["D"], b_alt)
-            cost_wf = curve_cost(out["D"], out["b"])
-        b_full = torch.zeros(L, N_f, dtype=torch.int32)
-        for t, mm in enumerate(out["mass"]):
-            b_full[t, out["seed_idx"][t].cpu().long()] = mm.cpu().to(torch.int32)
-        extras = {"mass_map": b_full, "kept_g": gidx, "b_t": out["b"],
-                  "b_even": b_t, "group_of": out["group_of"]}
-        if "protected" in out:
-            extras["protected"] = out["protected"]
-        if "mass_eff" in out:
-            me_full = torch.zeros(L, N_f, dtype=torch.float32)
-            for t, mm in enumerate(out["mass_eff"]):
-                me_full[t, out["seed_idx"][t].cpu().long()] = mm.cpu()
-            extras["mass_eff_map"] = me_full
-        dump_record(dump_dir, make_tag(cfg),
-                    {"I_raw": cls_attention, "radius": out["radius"],
-                     "D": out["D"], "r_curve": out["r"]},
-                    extras,
-                    {"method": "bv", "policy": "mq", "L": L, "N_f": N_f,
-                     "retention_ratio": float(cfg.retention_ratio), "B": B,
-                     "B_spent": spent,
-                     "lift": str(getattr(cfg, "lift", "kv")),
-                     "lift_norm": bool(getattr(cfg, "lift_norm", True)),
-                     "gamma_v": float(getattr(cfg, "gamma_v", 1.0)),
-                     "mq_alloc": str(getattr(cfg, "mq_alloc", "waterfill")),
-                     "centroid": str(getattr(cfg, "centroid", "rms")),
-                     "refine": int(getattr(cfg, "refine", 0)),
-                     "mass": bool(getattr(cfg, "mass", True)),
-                     "protect": float(getattr(cfg, "protect", 0.0)),
-                     "n_protected": int(out.get("n_protected", 0)),
-                     "mass_cap": float(getattr(cfg, "mass_cap", 0.0)),
-                     "mass_eff": bool(getattr(cfg, "mass_eff", False)),
-                     "cost": out["cost"], "planned": out["planned"],
-                     "cost_taken": cost_wf, "cost_even": cost_even,
-                     "spec": "2026-08-28_method_budgetvid2_v1"},
-                    frame_stats(cls_attention), cfg=cfg)
     return tokens, gidx
 

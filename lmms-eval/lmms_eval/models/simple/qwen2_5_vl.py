@@ -94,8 +94,6 @@ class Qwen2_5_VL(lmms):
         protect: float = 0.0,
         mass_cap: float = 0.0,
         mass_eff: bool = False,
-        # Per-video signal/routing dumps (budgetvid/recording.py). Empty = off.
-        dump_dir: str = "",
         **kwargs,
     ) -> None:
         super().__init__()
@@ -139,12 +137,6 @@ class Qwen2_5_VL(lmms):
         
         # ! Enable FlashVID
         assert not (enable_flashvid and enable_budgetvid), "enable_flashvid and enable_budgetvid are mutually exclusive; enable one at a time."
-        if dump_dir and enable_flashvid:
-            # Record FlashVID's own kept indices so the equal-entering-token
-            # mapping can be verified from the dumps rather than assumed.
-            from budgetvid.recording import wrap_flashvid_keep
-
-            wrap_flashvid_keep(dump_dir)
         if enable_budgetvid:
             from budgetvid import budgetvid
 
@@ -155,7 +147,6 @@ class Qwen2_5_VL(lmms):
                 mq_alloc=mq_alloc, centroid=centroid, b_max=b_max, mass=mass,
                 text_sdpa=text_sdpa, refine=refine, llm_prune=llm_prune,
                 protect=protect, mass_cap=mass_cap, mass_eff=mass_eff,
-                dump_dir=dump_dir,
                 retention_ratio=retention_ratio,
                 expansion=expansion,
                 do_segment=do_segment,
@@ -168,9 +159,6 @@ class Qwen2_5_VL(lmms):
                 pruning_layer=pruning_layer,
                 llm_retention_ratio=llm_retention_ratio,
             )
-        # Stash the compression config before accelerate wraps the model, so the
-        # chat wrapper can tag each dump with its video (see chat/qwen3_vl.py).
-        self._bv_cfg = getattr(self._model, "flashvid_config", None)
         if enable_flashvid:
             from flashvid import flashvid
 
